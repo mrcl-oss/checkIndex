@@ -1,4 +1,4 @@
-# checkindex
+# checkIndex
 
 **See index usage across every MongoDB replica-set data node—not just the primary.**
 
