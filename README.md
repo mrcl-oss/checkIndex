@@ -153,27 +153,36 @@ checkindex --all --json
 
 `--json` emits direct collection → index → profile/count nesting, with numeric profile counts and a numeric `total` per index. For example: `{ "items": { "ix": { "production": 123, "total": 123 } } }`. A direct connection uses the profile key `direct`. No wrapper or partial-status fields are included in JSON; failures are reported through the command error. JSON written to stdout contains no progress output; diagnostics are sent to stderr. With `--file`, JSON is written instead of Markdown. `--all --json` emits one combined document in the same shape, keyed by configured profile names.
 
-Go applications can import `github.com/mrcl-oss/checkIndex/report`. `report.Collect` accepts either `Options{ProfileName: "production"}` or a typed `Options{Direct: report.Profile{...}}`. It returns typed `Report.Collections` maps matching the direct JSON shape; on collection failures, available data is returned with the error and `Report.Partial` indicates incomplete collection. `report.Marshal` serializes only the direct nesting, never the API-only partial flag.
+Runnable Go API examples are in [`examples/`](examples/). Both use typed direct options and do not need a local profile:
+
+```sh
+MONGODB_PASSWORD='your-secret' go run ./examples/json-report \
+  --uri 'mongodb://seed.example:27017/?replicaSet=rs0' --username report-user --database app --auth admin
+MONGODB_PASSWORD='your-secret' go run ./examples/collection-report \
+  --uri 'mongodb://seed.example:27017/?replicaSet=rs0' --username report-user --database app --auth admin --collection orders
+```
+
+Set `MONGODB_PASSWORD` through an appropriate secret-management mechanism; environment variables avoid command-line arguments and source code but are not inherently secret (they may be exposed through process environments, diagnostics, or inherited by child processes). Add repeatable `--host-mapping discovered-host=reachable-host` flags when discovered node names are not reachable locally. The first example prints full JSON using `report.Marshal`; the second iterates counts for the selected collection. `report.Options` also supports direct URI, username, password, database, auth source, and host mappings in Go code. `ProfileName` remains available for local configured-profile selection. Partial results and errors retain their existing behavior.
 
 Direct mode is selected when all five connection flags (`--uri`, `--username`, `--password`, `--database`, and `--auth`) are supplied without `--cluster`. It does not read or create the profile config, and works even when the config is missing or contains only the blank starter profile. Without `--cluster`, any connection flags supplied with named profiles override only their corresponding fields on the alphabetically first named profile. If no usable named profile exists, partial connection flags fail clearly rather than being treated as direct mode. If `--cluster` is supplied, profile mode takes precedence and supplied connection flags override that profile. `--hostMapping source=target` may be repeated in either mode; mappings override matching configured keys in profile mode. Host mappings are optional in direct mode.
 
 **Password security:** `--password` is passed as a process argument and may be visible to other local users or captured in shell history/process monitoring. Avoid this flag on shared systems.
 
-| Option | Description |
-|--------|-------------|
-| `--cluster NAME` | Select a configured cluster profile. |
-| `--uri URI` | Direct connection URI or profile URI override. |
-| `--username USER` | Direct connection username or profile override. |
-| `--password PASSWORD`, `-p PASSWORD` | Direct password or profile override. Visible in process arguments; avoid on shared systems. |
-| `--database NAME` | Direct database name or profile override. |
-| `--auth SOURCE` | Direct authentication source or profile override. |
-| `--hostMapping SOURCE=TARGET` | Optional, repeatable mapping; CLI values replace matching profile keys. |
-| `--collection NAME`, `-c NAME` | Report only the named collection. Without it, all non-system collections are included. |
-| `--file [FILENAME]` | Write Markdown instead of terminal tables. Defaults to `output.md`; an optional filename follows the flag. |
-| `--all` | Report every configured profile in alphabetical order; other report and connection options are ignored. |
-| `--json` | Emit JSON to stdout or, with `--file`, the named file. |
-| `--help`, `-h` | Show help without reading configuration or connecting to MongoDB. |
-| `config` | Open the interactive configuration editor. |
+| Option                               | Description                                                                                                |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `--cluster NAME`                     | Select a configured cluster profile.                                                                       |
+| `--uri URI`                          | Direct connection URI or profile URI override.                                                             |
+| `--username USER`                    | Direct connection username or profile override.                                                            |
+| `--password PASSWORD`, `-p PASSWORD` | Direct password or profile override. Visible in process arguments; avoid on shared systems.                |
+| `--database NAME`                    | Direct database name or profile override.                                                                  |
+| `--auth SOURCE`                      | Direct authentication source or profile override.                                                          |
+| `--hostMapping SOURCE=TARGET`        | Optional, repeatable mapping; CLI values replace matching profile keys.                                    |
+| `--collection NAME`, `-c NAME`       | Report only the named collection. Without it, all non-system collections are included.                     |
+| `--file [FILENAME]`                  | Write Markdown instead of terminal tables. Defaults to `output.md`; an optional filename follows the flag. |
+| `--all`                              | Report every configured profile in alphabetical order; other report and connection options are ignored.    |
+| `--json`                             | Emit JSON to stdout or, with `--file`, the named file.                                                     |
+| `--help`, `-h`                       | Show help without reading configuration or connecting to MongoDB.                                          |
+| `config`                             | Open the interactive configuration editor.                                                                 |
 
 Markdown output is written with restrictive file permissions. The command refuses to overwrite the runtime configuration file. Status and warning messages remain on the console when the report itself is written to a file.
 
@@ -192,6 +201,7 @@ Tests use fakes and temporary directories; they do not require a live MongoDB cl
 ```text
 cmd/checkindex/       CLI entry point
 report/               public Go report API and stable report types
+examples/             standalone consumer programs for the public report API
 internal/checkindex/  config, MongoDB collection, reporting, and TUI
 scripts/install.sh    per-user build-and-install script
 ```
