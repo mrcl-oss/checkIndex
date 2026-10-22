@@ -1,0 +1,60 @@
+version: 2
+
+project_name: checkindex
+
+builds:
+  - id: checkindex
+    main: ./cmd/checkindex
+    binary: checkindex
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: archives
+    ids:
+      - checkindex
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+nfpms:
+  - id: deb
+    package_name: checkindex
+    ids:
+      - checkindex
+    formats:
+      - deb
+    maintainer: Marc Llobera Villalonga <m.llobera@outlook.com>
+    description: Inspect MongoDB index usage across replica-set data nodes.
+    license: Apache-2.0
+    bindir: /usr/bin
