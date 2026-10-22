@@ -138,11 +138,22 @@ checkindex --uri 'mongodb://seed.example:27017/?replicaSet=rs0' \
 # Write Markdown to output.md, or choose a file name
 checkindex --cluster production --file
 checkindex --cluster production --file indexes.md
+
+# Write machine-readable JSON to stdout or a file
+checkindex --cluster production --json
+checkindex --cluster production --json --file indexes.json
+
+# Combine every configured profile into one JSON document
+checkindex --all --json
 ```
 
 `--cluster` selects a profile from the config. If omitted, the alphabetically first named profile is selected.
 
 `--all` reports every configured cluster profile in alphabetical order, labeling each report with its profile name. In this mode, all other report and connection options are ignored (including `--cluster`, direct connection overrides, `--collection`, `--file`, and `--hostMapping`); reports go to standard output. Profile/report failures do not stop later profiles, but any failure makes the command exit nonzero.
+
+`--json` emits direct collection → index → profile/count nesting, with numeric profile counts and a numeric `total` per index. For example: `{ "items": { "ix": { "production": 123, "total": 123 } } }`. A direct connection uses the profile key `direct`. No wrapper or partial-status fields are included in JSON; failures are reported through the command error. JSON written to stdout contains no progress output; diagnostics are sent to stderr. With `--file`, JSON is written instead of Markdown. `--all --json` emits one combined document in the same shape, keyed by configured profile names.
+
+Go applications can import `github.com/mrcl-oss/checkIndex/report`. `report.Collect` accepts either `Options{ProfileName: "production"}` or a typed `Options{Direct: report.Profile{...}}`. It returns typed `Report.Collections` maps matching the direct JSON shape; on collection failures, available data is returned with the error and `Report.Partial` indicates incomplete collection. `report.Marshal` serializes only the direct nesting, never the API-only partial flag.
 
 Direct mode is selected when all five connection flags (`--uri`, `--username`, `--password`, `--database`, and `--auth`) are supplied without `--cluster`. It does not read or create the profile config, and works even when the config is missing or contains only the blank starter profile. Without `--cluster`, any connection flags supplied with named profiles override only their corresponding fields on the alphabetically first named profile. If no usable named profile exists, partial connection flags fail clearly rather than being treated as direct mode. If `--cluster` is supplied, profile mode takes precedence and supplied connection flags override that profile. `--hostMapping source=target` may be repeated in either mode; mappings override matching configured keys in profile mode. Host mappings are optional in direct mode.
 
@@ -160,6 +171,7 @@ Direct mode is selected when all five connection flags (`--uri`, `--username`, `
 | `--collection NAME`, `-c NAME` | Report only the named collection. Without it, all non-system collections are included. |
 | `--file [FILENAME]` | Write Markdown instead of terminal tables. Defaults to `output.md`; an optional filename follows the flag. |
 | `--all` | Report every configured profile in alphabetical order; other report and connection options are ignored. |
+| `--json` | Emit JSON to stdout or, with `--file`, the named file. |
 | `--help`, `-h` | Show help without reading configuration or connecting to MongoDB. |
 | `config` | Open the interactive configuration editor. |
 
@@ -179,6 +191,7 @@ Tests use fakes and temporary directories; they do not require a live MongoDB cl
 
 ```text
 cmd/checkindex/       CLI entry point
+report/               public Go report API and stable report types
 internal/checkindex/  config, MongoDB collection, reporting, and TUI
 scripts/install.sh    per-user build-and-install script
 ```

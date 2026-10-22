@@ -1,4 +1,4 @@
-module checkindex
+module github.com/mrcl-oss/checkIndex
 
 go 1.22
 

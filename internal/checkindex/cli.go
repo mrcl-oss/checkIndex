@@ -1,7 +1,9 @@
 package checkindex
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ type Options struct {
 	Cluster, Collection, File string
 	Password                  *string
 	Direct                    bool
+	JSON                      bool
 }
 
 // Reporter executes a report using the resolved profile and options.
@@ -53,6 +56,7 @@ func newCommand(home string, out, errOut io.Writer, report Reporter) *cli.Comman
 			&cli.StringFlag{Name: "collection", Aliases: []string{"c"}, Usage: "report only this collection", Category: "REPORT OPTIONS"},
 			&cli.BoolFlag{Name: "file", Usage: "write report to output.md or the optional filename argument", Category: "REPORT OPTIONS"},
 			&cli.BoolFlag{Name: "all", Usage: "report every configured cluster profile", Category: "REPORT OPTIONS"},
+			&cli.BoolFlag{Name: "json", Usage: "write machine-readable JSON", Category: "REPORT OPTIONS"},
 		},
 		ArgValidator: func(_ context.Context, cmd *cli.Command) error {
 			if cmd.NArg() > 1 || (cmd.NArg() > 0 && !cmd.Bool("file")) {
@@ -83,19 +87,49 @@ func newCommand(home string, out, errOut io.Writer, report Reporter) *cli.Comman
 				}
 				sort.Strings(names)
 				var failures []error
+				combined := map[string]map[string]map[string]int64{}
 				for _, name := range names {
 					profile, profileErr := config.selectProfile(name, nil)
 					if profileErr != nil {
 						failures = append(failures, fmt.Errorf("profile %q: %w", name, profileErr))
 						continue
 					}
-					if _, writeErr := fmt.Fprintf(cmd.Root().Writer, "Profile: %s\n", name); writeErr != nil {
-						failures = append(failures, fmt.Errorf("profile %q: %w", name, writeErr))
-						continue
+					if !cmd.Bool("json") {
+						if _, writeErr := fmt.Fprintf(cmd.Root().Writer, "Profile: %s\n", name); writeErr != nil {
+							failures = append(failures, fmt.Errorf("profile %q: %w", name, writeErr))
+							continue
+						}
 					}
-					if reportErr := report(ctx, profile, Options{}, cmd.Root().Writer); reportErr != nil {
+					var profileOut io.Writer = cmd.Root().Writer
+					var buffer bytes.Buffer
+					if cmd.Bool("json") {
+						profileOut = &buffer
+					}
+					if reportErr := report(ctx, profile, Options{JSON: cmd.Bool("json")}, profileOut); reportErr != nil {
 						failures = append(failures, fmt.Errorf("profile %q: %w", name, reportErr))
 					}
+					if cmd.Bool("json") && buffer.Len() > 0 {
+						var parsed map[string]map[string]map[string]int64
+						if json.Unmarshal(buffer.Bytes(), &parsed) == nil {
+							for collection, indexes := range parsed {
+								if combined[collection] == nil {
+									combined[collection] = map[string]map[string]int64{}
+								}
+								for index, values := range indexes {
+									if combined[collection][index] == nil {
+										combined[collection][index] = map[string]int64{}
+									}
+									value := values["total"]
+									combined[collection][index][name] = value
+									combined[collection][index]["total"] += value
+								}
+							}
+						}
+					}
+				}
+				if cmd.Bool("json") {
+					encoded, _ := json.Marshal(combined)
+					_, _ = fmt.Fprintln(cmd.Root().Writer, string(encoded))
 				}
 				return errors.Join(failures...)
 			}
@@ -118,7 +152,7 @@ func newCommand(home string, out, errOut io.Writer, report Reporter) *cli.Comman
 					return err
 				}
 			}
-			options := Options{Cluster: cmd.String("cluster"), Collection: cmd.String("collection")}
+			options := Options{Cluster: cmd.String("cluster"), Collection: cmd.String("collection"), JSON: cmd.Bool("json")}
 			if cmd.IsSet("password") {
 				password := cmd.String("password")
 				options.Password = &password

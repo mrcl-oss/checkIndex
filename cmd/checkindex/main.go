@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"checkindex/internal/checkindex"
+	"github.com/mrcl-oss/checkIndex/internal/checkindex"
 )
 
 func main() {

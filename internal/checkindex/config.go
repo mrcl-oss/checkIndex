@@ -72,6 +72,14 @@ func loadConfig(path string) (Config, error) {
 	return decodeConfig(data)
 }
 
+// LoadConfig loads the local configuration file without exposing credential values in errors.
+func LoadConfig(path string) (Config, error) { return loadConfig(path) }
+
+// SelectProfile resolves one configured profile.
+func (c Config) SelectProfile(name string, password *string) (Profile, error) {
+	return c.selectProfile(name, password)
+}
+
 func decodeConfig(data []byte) (Config, error) {
 	var c Config
 	decoder := json.NewDecoder(bytes.NewReader(data))

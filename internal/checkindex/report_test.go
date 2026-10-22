@@ -3,7 +3,9 @@ package checkindex
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -111,5 +113,94 @@ func TestMarkdownEscapesAndTotals(t *testing.T) {
 	}
 	if _, e := addOps(9223372036854775807, 1); e == nil {
 		t.Fatal("counter overflow silently accepted")
+	}
+}
+
+func TestJSONReportIsPureAndUsesExactNumericCounts(t *testing.T) {
+	seed := &fakeDB{hello: Hello{Me: "node"}, statusErr: errors.New("standalone"), names: []string{"items"}}
+	node := &fakeDB{rows: []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 9007199254740993}}}}
+	var out bytes.Buffer
+	err := collect(context.Background(), Profile{Name: "production", DBName: "db"}, Options{JSON: true}, &out, func(_ context.Context, _ Profile, host string) (Database, error) {
+		if host == "" {
+			return seed, nil
+		}
+		return node, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	d := json.NewDecoder(strings.NewReader(out.String()))
+	d.UseNumber()
+	if err = d.Decode(&parsed); err != nil {
+		t.Fatalf("not valid JSON: %v: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "[INFO]") || strings.Contains(out.String(), "[WARN]") {
+		t.Fatalf("diagnostics corrupted JSON: %s", out.String())
+	}
+	if len(parsed) != 1 || parsed["items"] == nil {
+		t.Fatalf("unexpected top-level shape: %#v", parsed)
+	}
+	collection := parsed["items"].(map[string]any)
+	index := collection["ix"].(map[string]any)
+	if len(collection) != 1 || index["production"] != json.Number("9007199254740993") || index["total"] != json.Number("9007199254740993") || len(index) != 2 {
+		t.Fatalf("unexpected direct nesting or numeric values: %#v", parsed)
+	}
+}
+
+func TestJSONFileContainsDocumentAndConsoleStaysClean(t *testing.T) {
+	seed := &fakeDB{hello: Hello{Me: "node"}, statusErr: errors.New("standalone"), names: []string{"items"}}
+	node := &fakeDB{rows: []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 4}}}}
+	path := t.TempDir() + "/report.json"
+	var out bytes.Buffer
+	err := collect(context.Background(), Profile{DBName: "db"}, Options{JSON: true, File: path}, &out, func(_ context.Context, _ Profile, host string) (Database, error) {
+		if host == "" {
+			return seed, nil
+		}
+		return node, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("JSON file mode wrote console diagnostics: %s", out.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]map[string]map[string]int64
+	if err = json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("invalid file JSON: %s", data)
+	}
+	if len(decoded) != 1 || len(decoded["items"]) != 1 || len(decoded["items"]["ix"]) != 2 || decoded["items"]["ix"]["direct"] != 4 || decoded["items"]["ix"]["total"] != 4 {
+		t.Fatalf("unexpected file schema: %s", data)
+	}
+}
+
+func TestJSONPartialFailurePreservesSuccessfulNodeData(t *testing.T) {
+	seed := &fakeDB{hello: Hello{Hosts: []string{"a", "b"}, Primary: "a"}, statusErr: errors.New("status unavailable")}
+	good := &fakeDB{rows: []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 5}}}}
+	bad := &fakeDB{statsErr: errors.New("sensitive error")}
+	var out bytes.Buffer
+	err := collect(context.Background(), Profile{Name: "cluster", DBName: "db"}, Options{JSON: true, Collection: "items"}, &out, func(_ context.Context, _ Profile, host string) (Database, error) {
+		switch host {
+		case "":
+			return seed, nil
+		case "a":
+			return good, nil
+		default:
+			return bad, nil
+		}
+	})
+	if err == nil {
+		t.Fatal("expected partial error")
+	}
+	var decoded map[string]map[string]map[string]int64
+	if e := json.Unmarshal(out.Bytes(), &decoded); e != nil {
+		t.Fatalf("invalid JSON: %v", e)
+	}
+	if decoded["items"]["ix"]["cluster"] != 5 || decoded["items"]["ix"]["total"] != 5 || len(decoded) != 1 {
+		t.Fatalf("partial data lost: %+v", decoded)
 	}
 }

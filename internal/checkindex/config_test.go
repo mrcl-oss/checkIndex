@@ -39,7 +39,7 @@ func TestBootstrapPrivateAndNoOverwrite(t *testing.T) {
 		}
 	}
 	data, _ := os.ReadFile(path)
-	if !bytes.Contains(data, []byte(`"": {`)) || bytes.Contains(data, []byte("valiant")) {
+	if !bytes.Contains(data, []byte(`"": {`)) || bytes.Contains(data, []byte("omega")) {
 		t.Fatal("bootstrap must contain only blank profile")
 	}
 	_, _ = loadConfig(path)
@@ -62,7 +62,7 @@ func TestBootstrapRestrictsExistingDirectory(t *testing.T) {
 }
 
 func TestConfigSchemaAndSelection(t *testing.T) {
-	valid := `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"alpha":{"initialUri":"mongodb://localhost","username":"u","password":"p"},"valiant":{"initialUri":"mongodb://localhost","username":"u","password":"p"},"unused":{},"z":{"initialUri":"mongodb://localhost","username":"u","password":"p"}}}`
+	valid := `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"alpha":{"initialUri":"mongodb://localhost","username":"u","password":"p"},"omega":{"initialUri":"mongodb://omega","username":"u","password":"p"},"unused":{},"z":{"initialUri":"mongodb://localhost","username":"u","password":"p"}}}`
 	c, e := decodeConfig([]byte(valid))
 	if e != nil {
 		t.Fatal(e)
@@ -71,7 +71,7 @@ func TestConfigSchemaAndSelection(t *testing.T) {
 	if e != nil || p.Name != "alpha" {
 		t.Fatalf("default: %+v %v", p, e)
 	}
-	delete(c.Cluster, "valiant")
+	delete(c.Cluster, "omega")
 	p, e = c.selectProfile("", nil)
 	if e != nil || p.Name != "alpha" {
 		t.Fatal("sorted default")

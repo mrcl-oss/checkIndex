@@ -2,6 +2,7 @@ package checkindex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,15 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
+
+type jsonReport map[string]map[string]map[string]int64
+
+var ErrPartialReport = errors.New("report is partial; one or more node queries failed")
+
+// CollectReport runs the same collector used by the CLI, returning its JSON representation.
+func CollectReport(ctx context.Context, p Profile, collection string, out io.Writer) error {
+	return collect(ctx, p, Options{Collection: collection, JSON: true}, out, dialMongo)
+}
 
 // Node identifies a MongoDB data node and its topology role.
 type Node struct{ Name, Role string }
@@ -121,6 +131,10 @@ func addOps(a, b int64) (int64, error) {
 }
 
 func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial) error {
+	if p.Name == "" {
+		p.Name = "direct"
+	}
+	result := make(jsonReport)
 	var opened []Database
 	defer func() {
 		for _, db := range opened {
@@ -158,7 +172,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		names = filtered
 	}
 	sort.Strings(names)
-	fmt.Fprintf(out, "[INFO] Found %d active data node(s); %d collection(s).\n", len(nodes), len(names))
+	if !o.JSON {
+		fmt.Fprintf(out, "[INFO] Found %d active data node(s); %d collection(s).\n", len(nodes), len(names))
+	}
 	clients := make(map[string]Database)
 	failed := false
 	for _, n := range nodes {
@@ -170,7 +186,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		if e != nil {
 			clients[n.Name] = nil
 			failed = true
-			fmt.Fprintln(out, "[WARN] Direct node connection failed; check connectivity, TLS and credentials.")
+			if !o.JSON {
+				fmt.Fprintln(out, "[WARN] Direct node connection failed; check connectivity, TLS and credentials.")
+			}
 			continue
 		}
 		opened = append(opened, db)
@@ -187,7 +205,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			stats, e := db.Stats(ctx, p.DBName, name)
 			if e != nil {
 				failed = true
-				fmt.Fprintln(out, "[WARN] Node index statistics unavailable; check connectivity and permissions.")
+				if !o.JSON {
+					fmt.Fprintln(out, "[WARN] Node index statistics unavailable; check connectivity and permissions.")
+				}
 				continue
 			}
 			for _, s := range stats {
@@ -204,14 +224,17 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			}
 		}
 		rows := make([]IndexUsage, 0, len(usage))
+		jsonIndexes := make(map[string]map[string]int64, len(usage))
 		var total int64
 		for _, v := range usage {
 			rows = append(rows, *v)
+			jsonIndexes[v.Name] = map[string]int64{p.Name: v.Total, "total": v.Total}
 			total, err = addOps(total, v.Total)
 			if err != nil {
 				return err
 			}
 		}
+		result[name] = jsonIndexes
 		sort.Slice(rows, func(i, j int) bool {
 			if rows[i].Total == rows[j].Total {
 				return rows[i].Name < rows[j].Name
@@ -222,11 +245,31 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		if err != nil {
 			return err
 		}
+		if o.JSON {
+			continue
+		}
 		if o.File != "" {
 			fmt.Fprintf(&markdown, "## %s.%s\n\n%s\nTotal operations for %s: %d\n\n", escapeMarkdown(p.DBName), escapeMarkdown(name), renderTables(rows, nodes, true), escapeMarkdown(name), total)
 		} else {
 			fmt.Fprintf(out, "\n=== %s.%s ===\n%s\nTotal operations for %s: %d\n", p.DBName, name, renderTables(rows, nodes, false), name, total)
 		}
+	}
+	if o.JSON {
+		encoded, encodeErr := json.Marshal(result)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if o.File != "" {
+			if err = os.WriteFile(o.File, append(encoded, '\n'), 0600); err != nil {
+				return fmt.Errorf("write report: %w", err)
+			}
+		} else if _, err = fmt.Fprintln(out, string(encoded)); err != nil {
+			return err
+		}
+		if failed {
+			return ErrPartialReport
+		}
+		return nil
 	}
 	suffix := ""
 	if failed {
@@ -242,7 +285,7 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		fmt.Fprintf(out, "Final sum of operations: %d%s\n", grandTotal, suffix)
 	}
 	if failed {
-		return errors.New("report is partial; one or more node queries failed")
+		return ErrPartialReport
 	}
 	return nil
 }

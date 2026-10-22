@@ -3,7 +3,9 @@ package checkindex
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -92,17 +94,46 @@ func TestCLIAllProfilesAreSortedLabeledAndIgnoreOverrides(t *testing.T) {
 	}
 }
 
+func TestCLIAllJSONCombinesProfilesAndIgnoresOverrides(t *testing.T) {
+	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"z":{"initialUri":"mongodb://z","username":"u","password":"p"},"a":{"initialUri":"mongodb://a","username":"u","password":"p"}}}`)
+	ignored := filepath.Join(t.TempDir(), "ignored.json")
+	var out bytes.Buffer
+	var calls int
+	err := run([]string{"--all", "--json", "--cluster", "missing", "--collection", "x", "--file", ignored, "--uri", "broken"}, home, &out, func(_ context.Context, p Profile, o Options, w io.Writer) error {
+		calls++
+		if !o.JSON || o.Cluster != "" || o.Collection != "" || o.File != "" {
+			t.Fatalf("flags not handled: %+v", o)
+		}
+		_, _ = fmt.Fprintf(w, `{"items":{"ix":{"%s":2,"total":2}}}`, p.Name)
+		return nil
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	var result map[string]any
+	if err = json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("combined output is not JSON: %q: %v", out.String(), err)
+	}
+	if _, err = os.Stat(ignored); !os.IsNotExist(err) {
+		t.Fatalf("--file should be ignored: %v", err)
+	}
+	index := result["items"].(map[string]any)["ix"].(map[string]any)
+	if len(result) != 1 || len(result["items"].(map[string]any)) != 1 || len(index) != 3 || index["a"] != float64(2) || index["z"] != float64(2) || index["total"] != float64(4) {
+		t.Fatalf("combined profile counts/total incorrect: %#v", index)
+	}
+}
+
 func TestCLIAllContinuesAfterProfileErrorsAndDefaultRemainsUnchanged(t *testing.T) {
-	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"valiant":{"initialUri":"mongodb://valiant","username":"u","password":"p"},"alpha":{"initialUri":"mongodb://alpha","username":"u","password":"p"},"z":{"initialUri":"mongodb://z","username":"u","password":"p"}}}`)
+	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"omega":{"initialUri":"mongodb://omega","username":"u","password":"p"},"alpha":{"initialUri":"mongodb://alpha","username":"u","password":"p"},"z":{"initialUri":"mongodb://z","username":"u","password":"p"}}}`)
 	var attempted []string
 	err := run([]string{"--all"}, home, io.Discard, func(_ context.Context, p Profile, _ Options, _ io.Writer) error {
 		attempted = append(attempted, p.Name)
-		if p.Name == "valiant" {
+		if p.Name == "omega" {
 			return errors.New("report failed")
 		}
 		return nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "report failed") || strings.Join(attempted, ",") != "alpha,valiant,z" {
+	if err == nil || !strings.Contains(err.Error(), "report failed") || strings.Join(attempted, ",") != "alpha,omega,z" {
 		t.Fatalf("expected aggregated errors and continued reports: attempted=%v err=%v", attempted, err)
 	}
 	called := ""
@@ -113,7 +144,7 @@ func TestCLIAllContinuesAfterProfileErrorsAndDefaultRemainsUnchanged(t *testing.
 }
 
 func TestCLIAlphabeticalDefaultAndPartialOverrides(t *testing.T) {
-	home := writeTestConfig(t, `{"dbName":"base-db","authSource":"base-auth","hostMapping":{"old":"kept"},"cluster":{"z":{"initialUri":"mongodb://z","username":"z-user","password":"z-pass"},"valiant":{"initialUri":"mongodb://valiant","username":"v-user","password":"v-pass"},"alpha":{"initialUri":"mongodb://alpha","username":"a-user","password":"a-pass"}}}`)
+	home := writeTestConfig(t, `{"dbName":"base-db","authSource":"base-auth","hostMapping":{"old":"kept"},"cluster":{"z":{"initialUri":"mongodb://z","username":"z-user","password":"z-pass"},"omega":{"initialUri":"mongodb://omega","username":"v-user","password":"v-pass"},"alpha":{"initialUri":"mongodb://alpha","username":"a-user","password":"a-pass"}}}`)
 	for _, tc := range []struct {
 		name string
 		args []string
