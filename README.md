@@ -35,45 +35,64 @@ By default, it includes all non-system collections. Use `--collection` to select
 
 ## Requirements
 
-- Linux/macOS terminal for the provided installer; Windows users can build with Go directly.
-- Go 1.22 or newer to build from source.
 - Network access from the host to the seed and discovered MongoDB nodes.
 - A MongoDB account with permission to run aggregation with `$indexStats` on the target database and collections.
+- Go 1.27.3 or newer only when building from source. Prebuilt binaries and Debian packages do not require Go.
 
 The runtime binary does **not** require Node.js or `mongosh`.
 
 ## Install
 
-### Install from a source checkout
+Choose the option that fits your system. The source installer and manual build require Go; release archives and Debian packages are ready to run.
 
-Clone or download this repository, then run the installer from the checkout:
+### Prebuilt release archive (Linux, macOS, Windows)
+
+1. Open the [GitHub Releases](https://github.com/mrcl-oss/checkIndex/releases) page and download the archive matching your OS and architecture: Linux and macOS (`amd64` or `arm64`), or Windows (`amd64`).
+2. Extract the `.tar.gz` archive on Linux/macOS or the `.zip` archive on Windows.
+3. Run the extracted `checkindex` executable, or move it to a directory on your `PATH`.
+
+For example, on Linux or macOS, after extracting the archive in the current directory:
 
 ```sh
-git clone <repository-url>
+install -m 0755 checkindex "$HOME/.local/bin/checkindex"
+checkindex --help
+```
+
+Create `$HOME/.local/bin` first if it does not exist, and ensure it is on `PATH`. The executable name inside each archive is `checkindex` (or `checkindex.exe` on Windows).
+
+### Debian/Ubuntu package
+
+Download the `.deb` for your Linux architecture (`amd64` or `arm64`) from the [GitHub Releases](https://github.com/mrcl-oss/checkIndex/releases) page, then install the downloaded local file:
+
+```sh
+sudo apt install ./checkindex_1.0.0_linux_amd64.deb
+checkindex --help
+```
+
+Replace the example filename with the exact package you downloaded; for ARM64, choose the `arm64` asset instead. This installs a local `.deb` package; it is **not an APT repository** and does not configure APT to find or manage future checkindex updates. To update, download and install a newer release package.
+
+### Build and install from source
+
+Clone the repository, then run its installer from the checkout. Go 1.27.3 or newer must be installed and available on `PATH`.
+
+```sh
+git clone https://github.com/mrcl-oss/checkIndex.git
 cd checkIndex
 ./scripts/install.sh
 ```
 
-The script builds `checkindex` locally and installs it to `${XDG_BIN_HOME:-$HOME/.local/bin}`. It does not require `sudo` and does not create or modify your MongoDB configuration. If the destination is not on `PATH`, add it to your shell configuration, for example:
-
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Open a new shell or reload the shell configuration, then verify:
+The script builds locally and installs to `${XDG_BIN_HOME:-$HOME/.local/bin}`. It does not use `sudo`. Add the destination to `PATH` if needed (for the default location, `export PATH="$HOME/.local/bin:$PATH"`), then verify:
 
 ```sh
 checkindex --help
 ```
 
-### Build manually
+To build without installing, run from the repository root:
 
 ```sh
 go build -o bin/checkindex ./cmd/checkindex
 ./bin/checkindex --help
 ```
-
-Prebuilt release downloads are not currently provided; the installer builds from source on the target machine.
 
 ## Configure
 
