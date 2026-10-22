@@ -1,7 +1,6 @@
 # checkIndex
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/mrcl-oss/checkIndex)](https://golang.org/)
-[![Go Report Card](https://img.shields.io/badge/go%20report-A+-brightgreen.svg?style=flat)](https://goreportcard.com/report/github.com/mrcl-oss/checkIndex)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mrcl-oss/checkIndex.svg)](https://pkg.go.dev/github.com/mrcl-oss/checkIndex)
 [![CI](https://github.com/mrcl-oss/checkIndex/actions/workflows/ci.yml/badge.svg)](https://github.com/mrcl-oss/checkIndex/actions/workflows/ci.yml)
 
