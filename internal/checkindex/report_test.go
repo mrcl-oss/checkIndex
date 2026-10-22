@@ -107,7 +107,10 @@ func TestPartialFailureCleanupAndExplicitSystemCollection(t *testing.T) {
 
 func TestMarkdownEscapesAndTotals(t *testing.T) {
 	rows := []IndexUsage{{Name: "x|y\nnext", Key: bson.D{{Key: "z", Value: 1}, {Key: "a", Value: -1}}, Total: 42, PerNode: map[string]int64{"node": 42}}}
-	text := renderTables(rows, []Node{{Name: "node", Role: "PRIMARY"}}, true)
+	text, err := renderTables(rows, []Node{{Name: "node", Role: "PRIMARY"}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(text, `x\|y next`) || !strings.Contains(text, "| Total |") || !strings.Contains(text, `{"z":1,"a":-1}`) {
 		t.Fatal(text)
 	}

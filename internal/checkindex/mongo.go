@@ -96,9 +96,8 @@ func (m *mongoDB) Stats(ctx context.Context, db, name string) ([]IndexStat, erro
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
 	var rows []IndexStat
 	err = cursor.All(ctx, &rows)
-	return rows, err
+	return rows, errors.Join(err, cursor.Close(ctx))
 }
 func (m *mongoDB) Close(ctx context.Context) error { return m.client.Disconnect(ctx) }

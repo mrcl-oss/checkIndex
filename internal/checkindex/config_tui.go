@@ -105,9 +105,10 @@ func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.activate()
 		return m, cmd
 	case "a":
-		if m.screen == screenProfiles {
+		switch m.screen {
+		case screenProfiles:
 			m.beginField("Profile name", "", "profile name")
-		} else if m.screen == screenHostMappings {
+		case screenHostMappings:
 			m.beginField("Host mapping key", "", "host-key")
 		}
 	case "d":

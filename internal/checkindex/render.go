@@ -13,7 +13,7 @@ func escapeMarkdown(s string) string {
 	return strings.NewReplacer("\\", "\\\\", "|", "\\|", "\r", " ", "\n", " ").Replace(s)
 }
 
-func renderTables(rows []IndexUsage, nodes []Node, markdown bool) string {
+func renderTables(rows []IndexUsage, nodes []Node, markdown bool) (string, error) {
 	var result strings.Builder
 	// Two node columns per table keep wide replica sets readable without truncating keys.
 	for start := 0; start < len(nodes) || start == 0; start += 2 {
@@ -34,30 +34,42 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) string {
 		if !markdown {
 			writer = tabwriter.NewWriter(&table, 0, 4, 2, ' ', 0)
 		}
-		writeRow := func(cells []string) {
+		writeRow := func(cells []string) error {
 			if markdown {
 				escaped := make([]string, len(cells))
 				for i, c := range cells {
 					escaped[i] = escapeMarkdown(c)
 				}
-				fmt.Fprintf(&table, "| %s |\n", strings.Join(escaped, " | "))
+				_, err := fmt.Fprintf(&table, "| %s |\n", strings.Join(escaped, " | "))
+				return err
 			} else {
 				for i, c := range cells {
 					if i > 0 {
-						fmt.Fprint(writer, "\t| ")
+						if _, err := fmt.Fprint(writer, "\t| "); err != nil {
+							return err
+						}
 					}
-					fmt.Fprint(writer, strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(c))
+					if _, err := fmt.Fprint(writer, strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(c)); err != nil {
+						return err
+					}
 				}
-				fmt.Fprintln(writer)
+				if _, err := fmt.Fprintln(writer); err != nil {
+					return err
+				}
 			}
+			return nil
 		}
-		writeRow(headings)
+		if err := writeRow(headings); err != nil {
+			return "", err
+		}
 		if markdown {
 			cells := make([]string, len(headings))
 			for i := range cells {
 				cells[i] = "---"
 			}
-			writeRow(cells)
+			if err := writeRow(cells); err != nil {
+				return "", err
+			}
 		}
 		for _, r := range rows {
 			key, _ := bson.MarshalExtJSON(r.Key, false, false)
@@ -72,10 +84,14 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) string {
 			if last {
 				cells = append(cells, strconv.FormatInt(r.Total, 10))
 			}
-			writeRow(cells)
+			if err := writeRow(cells); err != nil {
+				return "", err
+			}
 		}
 		if writer != nil {
-			_ = writer.Flush()
+			if err := writer.Flush(); err != nil {
+				return "", err
+			}
 		}
 		result.WriteString(table.String())
 		if !last {
@@ -84,5 +100,5 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) string {
 			break
 		}
 	}
-	return result.String()
+	return result.String(), nil
 }

@@ -173,7 +173,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 	}
 	sort.Strings(names)
 	if !o.JSON {
-		fmt.Fprintf(out, "[INFO] Found %d active data node(s); %d collection(s).\n", len(nodes), len(names))
+		if _, err := fmt.Fprintf(out, "[INFO] Found %d active data node(s); %d collection(s).\n", len(nodes), len(names)); err != nil {
+			return err
+		}
 	}
 	clients := make(map[string]Database)
 	failed := false
@@ -187,7 +189,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			clients[n.Name] = nil
 			failed = true
 			if !o.JSON {
-				fmt.Fprintln(out, "[WARN] Direct node connection failed; check connectivity, TLS and credentials.")
+				if _, err := fmt.Fprintln(out, "[WARN] Direct node connection failed; check connectivity, TLS and credentials."); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -206,7 +210,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			if e != nil {
 				failed = true
 				if !o.JSON {
-					fmt.Fprintln(out, "[WARN] Node index statistics unavailable; check connectivity and permissions.")
+					if _, err := fmt.Fprintln(out, "[WARN] Node index statistics unavailable; check connectivity and permissions."); err != nil {
+						return err
+					}
 				}
 				continue
 			}
@@ -249,9 +255,19 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			continue
 		}
 		if o.File != "" {
-			fmt.Fprintf(&markdown, "## %s.%s\n\n%s\nTotal operations for %s: %d\n\n", escapeMarkdown(p.DBName), escapeMarkdown(name), renderTables(rows, nodes, true), escapeMarkdown(name), total)
+			table, renderErr := renderTables(rows, nodes, true)
+			if renderErr != nil {
+				return renderErr
+			}
+			fmt.Fprintf(&markdown, "## %s.%s\n\n%s\nTotal operations for %s: %d\n\n", escapeMarkdown(p.DBName), escapeMarkdown(name), table, escapeMarkdown(name), total)
 		} else {
-			fmt.Fprintf(out, "\n=== %s.%s ===\n%s\nTotal operations for %s: %d\n", p.DBName, name, renderTables(rows, nodes, false), name, total)
+			table, renderErr := renderTables(rows, nodes, false)
+			if renderErr != nil {
+				return renderErr
+			}
+			if _, err := fmt.Fprintf(out, "\n=== %s.%s ===\n%s\nTotal operations for %s: %d\n", p.DBName, name, table, name, total); err != nil {
+				return err
+			}
 		}
 	}
 	if o.JSON {
@@ -280,9 +296,13 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		if err = os.WriteFile(o.File, []byte(markdown.String()), 0600); err != nil {
 			return fmt.Errorf("write report: %w", err)
 		}
-		fmt.Fprintf(out, "[INFO] Markdown report written to %s\n", o.File)
+		if _, err := fmt.Fprintf(out, "[INFO] Markdown report written to %s\n", o.File); err != nil {
+			return err
+		}
 	} else {
-		fmt.Fprintf(out, "Final sum of operations: %d%s\n", grandTotal, suffix)
+		if _, err := fmt.Fprintf(out, "Final sum of operations: %d%s\n", grandTotal, suffix); err != nil {
+			return err
+		}
 	}
 	if failed {
 		return ErrPartialReport

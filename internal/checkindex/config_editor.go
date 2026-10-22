@@ -21,7 +21,9 @@ type passwordReader func() (string, error)
 func editConfig(input io.Reader, output io.Writer, readPassword passwordReader, initial Config) (Config, bool, error) {
 	scanner := bufio.NewScanner(input)
 	read := func(prompt string) (string, error) {
-		fmt.Fprint(output, prompt)
+		if _, err := fmt.Fprint(output, prompt); err != nil {
+			return "", err
+		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return "", err
@@ -32,11 +34,21 @@ func editConfig(input io.Reader, output io.Writer, readPassword passwordReader, 
 	}
 	c := cloneConfig(initial)
 	for {
-		fmt.Fprintln(output, "\nConfiguration")
-		fmt.Fprintln(output, "1) Edit shared settings")
-		fmt.Fprintln(output, "2) Manage cluster profiles")
-		fmt.Fprintln(output, "3) Save and quit")
-		fmt.Fprintln(output, "4) Quit without saving")
+		if _, err := fmt.Fprintln(output, "\nConfiguration"); err != nil {
+			return initial, false, err
+		}
+		if _, err := fmt.Fprintln(output, "1) Edit shared settings"); err != nil {
+			return initial, false, err
+		}
+		if _, err := fmt.Fprintln(output, "2) Manage cluster profiles"); err != nil {
+			return initial, false, err
+		}
+		if _, err := fmt.Fprintln(output, "3) Save and quit"); err != nil {
+			return initial, false, err
+		}
+		if _, err := fmt.Fprintln(output, "4) Quit without saving"); err != nil {
+			return initial, false, err
+		}
 		choice, err := read("> ")
 		if err != nil {
 			return initial, false, err
@@ -58,7 +70,9 @@ func editConfig(input io.Reader, output io.Writer, readPassword passwordReader, 
 		case "4":
 			return initial, false, nil
 		default:
-			fmt.Fprintln(output, "Invalid choice.")
+			if _, err := fmt.Fprintln(output, "Invalid choice."); err != nil {
+				return initial, false, err
+			}
 		}
 	}
 }
@@ -75,7 +89,9 @@ func redactURI(raw string) string {
 
 func editShared(read prompt, out io.Writer, c *Config) error {
 	for {
-		fmt.Fprintf(out, "Shared settings: 1) dbName [%s] 2) authSource [%s] 3) hostMapping 0) Back\n", c.DBName, c.AuthSource)
+		if _, err := fmt.Fprintf(out, "Shared settings: 1) dbName [%s] 2) authSource [%s] 3) hostMapping 0) Back\n", c.DBName, c.AuthSource); err != nil {
+			return err
+		}
 		v, err := read("> ")
 		if err != nil {
 			return err
@@ -98,7 +114,9 @@ func editShared(read prompt, out io.Writer, c *Config) error {
 			*target = n
 			if e = validateConfig(*c); e != nil {
 				*target = old
-				fmt.Fprintln(out, e)
+				if _, writeErr := fmt.Fprintln(out, e); writeErr != nil {
+					return writeErr
+				}
 			}
 		case "3":
 			keys := make([]string, 0, len(c.HostMapping))
@@ -106,11 +124,17 @@ func editShared(read prompt, out io.Writer, c *Config) error {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
-			fmt.Fprintln(out, "Current host mappings:")
-			for _, key := range keys {
-				fmt.Fprintf(out, "- %s = %s\n", key, c.HostMapping[key])
+			if _, err := fmt.Fprintln(out, "Current host mappings:"); err != nil {
+				return err
 			}
-			fmt.Fprintln(out, "Host mapping: 1) Add or edit entry 2) Remove entry 0) Back")
+			for _, key := range keys {
+				if _, err := fmt.Fprintf(out, "- %s = %s\n", key, c.HostMapping[key]); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(out, "Host mapping: 1) Add or edit entry 2) Remove entry 0) Back"); err != nil {
+				return err
+			}
 			action, e := read("> ")
 			if e != nil {
 				return e
@@ -119,7 +143,9 @@ func editShared(read prompt, out io.Writer, c *Config) error {
 				continue
 			}
 			if action != "1" && action != "2" {
-				fmt.Fprintln(out, "Invalid choice.")
+				if _, err := fmt.Fprintln(out, "Invalid choice."); err != nil {
+					return err
+				}
 				continue
 			}
 			key, e := read("Host key: ")
@@ -128,7 +154,9 @@ func editShared(read prompt, out io.Writer, c *Config) error {
 			}
 			if action == "2" {
 				if _, ok := c.HostMapping[key]; !ok {
-					fmt.Fprintln(out, "Unknown host key.")
+					if _, err := fmt.Fprintln(out, "Unknown host key."); err != nil {
+						return err
+					}
 					continue
 				}
 				delete(c.HostMapping, key)
@@ -146,10 +174,14 @@ func editShared(read prompt, out io.Writer, c *Config) error {
 				} else {
 					delete(c.HostMapping, key)
 				}
-				fmt.Fprintln(out, e)
+				if _, writeErr := fmt.Fprintln(out, e); writeErr != nil {
+					return writeErr
+				}
 			}
 		default:
-			fmt.Fprintln(out, "Invalid choice.")
+			if _, err := fmt.Fprintln(out, "Invalid choice."); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -161,16 +193,22 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		fmt.Fprintln(out, "Cluster profiles:")
+		if _, err := fmt.Fprintln(out, "Cluster profiles:"); err != nil {
+			return err
+		}
 		for _, n := range names {
 			p := c.Cluster[n]
 			password := "<empty>"
 			if p.Password != "" {
 				password = "<configured>"
 			}
-			fmt.Fprintf(out, "- %s: initialUri=%s username=%s password=%s\n", n, redactURI(p.InitialURI), p.Username, password)
+			if _, err := fmt.Fprintf(out, "- %s: initialUri=%s username=%s password=%s\n", n, redactURI(p.InitialURI), p.Username, password); err != nil {
+				return err
+			}
 		}
-		fmt.Fprintln(out, "1) Choose profile 2) Add profile 0) Back")
+		if _, err := fmt.Fprintln(out, "1) Choose profile 2) Add profile 0) Back"); err != nil {
+			return err
+		}
 		v, e := read("> ")
 		if e != nil {
 			return e
@@ -184,11 +222,15 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 				return e
 			}
 			if strings.TrimSpace(name) == "" {
-				fmt.Fprintln(out, "Profile name must be nonempty.")
+				if _, err := fmt.Fprintln(out, "Profile name must be nonempty."); err != nil {
+					return err
+				}
 				continue
 			}
 			if _, ok := c.Cluster[name]; ok {
-				fmt.Fprintln(out, "Profile already exists.")
+				if _, err := fmt.Fprintln(out, "Profile already exists."); err != nil {
+					return err
+				}
 				continue
 			}
 			p := Credentials{}
@@ -198,7 +240,9 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 			if p.Username, e = read("username: "); e != nil {
 				return e
 			}
-			fmt.Fprint(out, "password (input hidden): ")
+			if _, e = fmt.Fprint(out, "password (input hidden): "); e != nil {
+				return e
+			}
 			if p.Password, e = readPassword(); e != nil {
 				return e
 			}
@@ -210,7 +254,9 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 			}
 			p, ok := c.Cluster[name]
 			if !ok {
-				fmt.Fprintln(out, "Unknown profile.")
+				if _, err := fmt.Fprintln(out, "Unknown profile."); err != nil {
+					return err
+				}
 				continue
 			}
 		profileLoop:
@@ -219,7 +265,9 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 				if p.Password != "" {
 					password = "<configured>"
 				}
-				fmt.Fprintf(out, "1) initialUri [%s] 2) username [%s] 3) password [%s] 4) Delete profile 0) Back\n", redactURI(p.InitialURI), p.Username, password)
+				if _, e = fmt.Fprintf(out, "1) initialUri [%s] 2) username [%s] 3) password [%s] 4) Delete profile 0) Back\n", redactURI(p.InitialURI), p.Username, password); e != nil {
+					return e
+				}
 				field, e := read("> ")
 				if e != nil {
 					return e
@@ -239,7 +287,9 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 					}
 					c.Cluster[name] = p
 				case "3":
-					fmt.Fprint(out, "password (input hidden): ")
+					if _, e = fmt.Fprint(out, "password (input hidden): "); e != nil {
+						return e
+					}
 					val, e := readPassword()
 					if e != nil {
 						return e
@@ -248,7 +298,9 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 					c.Cluster[name] = p
 				case "4":
 					if len(c.Cluster) == 1 {
-						fmt.Fprintln(out, "Cannot delete the final profile.")
+						if _, err := fmt.Fprintln(out, "Cannot delete the final profile."); err != nil {
+							return err
+						}
 						continue
 					}
 					confirm, e := read("Delete profile? [y/N]: ")
@@ -260,11 +312,15 @@ func editProfiles(read prompt, out io.Writer, readPassword passwordReader, c *Co
 					}
 					break profileLoop
 				default:
-					fmt.Fprintln(out, "Invalid choice.")
+					if _, err := fmt.Fprintln(out, "Invalid choice."); err != nil {
+						return err
+					}
 				}
 			}
 		default:
-			fmt.Fprintln(out, "Invalid choice.")
+			if _, err := fmt.Fprintln(out, "Invalid choice."); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -290,7 +346,7 @@ func validateConfig(c Config) error {
 	return e
 }
 
-func saveConfig(path string, c Config) error {
+func saveConfig(path string, c Config) (resultErr error) {
 	if err := validateConfig(c); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
@@ -314,7 +370,11 @@ func saveConfig(path string, c Config) error {
 		return fmt.Errorf("create temporary config: %w", err)
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() {
+		if removeErr := os.Remove(tmp); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove temporary config: %w", removeErr))
+		}
+	}()
 	if err = f.Chmod(0600); err == nil {
 		var b []byte
 		b, err = json.MarshalIndent(c, "", "  ")
@@ -395,7 +455,7 @@ func terminalPasswordReader() passwordReader {
 			return "", errors.New("password input requires an interactive terminal")
 		}
 		b, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stdout)
-		return string(b), err
+		_, writeErr := fmt.Fprintln(os.Stdout)
+		return string(b), errors.Join(err, writeErr)
 	}
 }

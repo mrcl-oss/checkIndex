@@ -100,7 +100,7 @@ func newCommand(home string, out, errOut io.Writer, report Reporter) *cli.Comman
 							continue
 						}
 					}
-					var profileOut io.Writer = cmd.Root().Writer
+					profileOut := cmd.Root().Writer
 					var buffer bytes.Buffer
 					if cmd.Bool("json") {
 						profileOut = &buffer
