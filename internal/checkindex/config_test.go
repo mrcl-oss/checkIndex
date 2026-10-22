@@ -27,6 +27,9 @@ func TestExecutableHelpWithoutHome(t *testing.T) {
 }
 
 func TestBootstrapPrivateAndNoOverwrite(t *testing.T) {
+	if got := defaultConfig().HostMapping; got == nil || len(got) != 0 {
+		t.Fatalf("starter shared mapping=%v, want empty object", got)
+	}
 	path := filepath.Join(t.TempDir(), ".checkIndex", "config.json")
 	_, err := loadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "Edit") {
@@ -94,6 +97,75 @@ func TestConfigSchemaAndSelection(t *testing.T) {
 	p, e = c.selectProfile("z", &override)
 	if e != nil || p.Password != override {
 		t.Fatal("password override")
+	}
+}
+
+func TestProfileHostMappingOverridesSharedIncludingEmpty(t *testing.T) {
+	input := `{"dbName":"db","authSource":"admin","hostMapping":{"mongo:27017":"localhost:27017","shared":"shared-target"},"cluster":{"inherit":{"initialUri":"mongodb://a","username":"u","password":"p"},"override":{"initialUri":"mongodb://b","username":"u","password":"p","hostMapping":{"mongo:27017":"mongo:27017"}},"isolated":{"initialUri":"mongodb://c","username":"u","password":"p","hostMapping":{}}}}`
+	c, err := decodeConfig([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]map[string]string{
+		"inherit":  {"mongo:27017": "localhost:27017", "shared": "shared-target"},
+		"override": {"mongo:27017": "mongo:27017"},
+		"isolated": {},
+	} {
+		got, err := c.selectProfile(name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.HostMapping) != len(want) {
+			t.Errorf("%s mappings=%v want %v", name, got.HostMapping, want)
+			continue
+		}
+		for key, value := range want {
+			if got.HostMapping[key] != value {
+				t.Errorf("%s mappings=%v want %v", name, got.HostMapping, want)
+			}
+		}
+	}
+}
+
+func TestEmptyProfileHostMappingSurvivesConfigRoundTrip(t *testing.T) {
+	c, err := decodeConfig([]byte(`{"dbName":"db","authSource":"admin","hostMapping":{"mongo:27017":"localhost:27017"},"cluster":{"isolated":{"initialUri":"mongodb://db","username":"u","password":"p","hostMapping":{}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := saveConfig(path, c); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cluster["isolated"].HostMapping == nil {
+		t.Fatal("explicit empty hostMapping became inheritance")
+	}
+	p, err := loaded.selectProfile("isolated", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.HostMapping) != 0 {
+		t.Fatalf("profile inherited shared mappings: %v", p.HostMapping)
+	}
+}
+
+func TestNullProfileHostMappingInheritsSharedMapping(t *testing.T) {
+	c, err := decodeConfig([]byte(`{"dbName":"db","authSource":"admin","hostMapping":{"mongo:27017":"localhost:27017"},"cluster":{"legacy":{"initialUri":"mongodb://db","username":"u","password":"p","hostMapping":null}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.selectProfile("legacy", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.HostMapping["mongo:27017"] != "localhost:27017" {
+		t.Fatalf("null mapping did not inherit: %v", p.HostMapping)
 	}
 }
 

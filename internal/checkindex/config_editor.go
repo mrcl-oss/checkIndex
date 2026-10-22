@@ -333,6 +333,13 @@ func cloneConfig(c Config) Config {
 	}
 	out.Cluster = map[string]Credentials{}
 	for k, v := range c.Cluster {
+		if v.HostMapping != nil {
+			copied := map[string]string{}
+			for key, value := range v.HostMapping {
+				copied[key] = value
+			}
+			v.HostMapping = copied
+		}
 		out.Cluster[k] = v
 	}
 	return out

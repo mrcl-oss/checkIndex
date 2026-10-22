@@ -115,13 +115,20 @@ Example structure (replace placeholders locally; do not commit credentials):
     "production": {
       "initialUri": "mongodb://your-seed-host:27017/database?authSource=admin",
       "username": "your-user",
-      "password": "your-password"
+      "password": "your-password",
+      "hostMapping": {"mongo:27017": "localhost:27017"}
+    },
+    "container-network": {
+      "initialUri": "mongodb://your-seed-host:27017/database?authSource=admin",
+      "username": "your-user",
+      "password": "your-password",
+      "hostMapping": {"mongo:27017": "mongo:27017"}
     }
   }
 }
 ```
 
-Cluster profile names are user-defined. Each profile needs an `initialUri`, `username`, and `password`. Use `mongodb://` or `mongodb+srv://` URIs. `hostMapping` is an optional object mapping discovered node addresses to addresses reachable from this machine, for example when internal DNS names need local replacements.
+Cluster profile names are user-defined. Each profile needs an `initialUri`, `username`, and `password`. Use `mongodb://` or `mongodb+srv://` URIs. A profile-level `hostMapping` fully replaces the top-level shared mapping: omitted or `null` inherits the shared map, while `{}` explicitly disables it. This lets profiles map the same discovered address differently. Newly generated starter configs have an empty shared mapping.
 
 ### Interactive configuration editor
 
@@ -131,7 +138,7 @@ Run this from an interactive terminal:
 checkindex config
 ```
 
-The keyboard-driven editor lets you view and change shared settings, host mappings, and cluster profiles; add or remove profiles; and save or discard changes. Use **↑/↓** or **Tab** to navigate, **Enter** to select, and **Esc** to go back or cancel. Profile and host-mapping views also provide add/remove shortcuts shown on screen. Passwords are hidden while entering them, and credentials embedded in displayed URIs are redacted. Changes are validated and saved atomically only when you choose **Save and quit**.
+The keyboard-driven editor lets you view and change shared settings, host mappings, and cluster profiles; add or remove profiles; and save or discard changes. Use **↑/↓** or **Tab** to navigate, **Enter** to select, and **Esc** to go back or cancel. Profile mapping screens identify overrides and offer a way to restore shared mapping inheritance. Passwords are hidden while entering them, and credentials embedded in displayed URIs are redacted. Changes are validated and saved atomically only when you choose **Save and quit**.
 
 ## Usage
 

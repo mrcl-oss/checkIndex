@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -210,7 +211,8 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			if e != nil {
 				failed = true
 				if !o.JSON {
-					if _, err := fmt.Fprintln(out, "[WARN] Node index statistics unavailable; check connectivity and permissions."); err != nil {
+					diagnostic := safeStatsError(e, p)
+					if _, err := fmt.Fprintf(out, "[WARN] $indexStats failed for node %s, collection %s (%s): %s.\n", n.Name, name, fmt.Sprintf("%T", e), diagnostic); err != nil {
 						return err
 					}
 				}
@@ -308,4 +310,22 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		return ErrPartialReport
 	}
 	return nil
+}
+
+var mongoURIInError = regexp.MustCompile(`(?i)mongodb(?:\+srv)?://[^\s"']+`)
+
+func safeStatsError(err error, p Profile) string {
+	message := mongoURIInError.ReplaceAllString(err.Error(), "[redacted MongoDB URI]")
+	for _, secret := range []string{p.Username, p.Password} {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	lower := strings.ToLower(message)
+	for _, class := range []string{"unauthorized", "not authorized", "authentication failed", "network timeout", "server selection", "unsupported", "decode", "cursor", "$indexstats"} {
+		if strings.Contains(lower, class) {
+			return message
+		}
+	}
+	return "statistics query failed (cause text omitted for safety)"
 }

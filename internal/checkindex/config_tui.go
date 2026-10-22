@@ -27,6 +27,8 @@ type configModel struct {
 	field, value, profile, action string
 	errorText                     string
 	done, save                    bool
+	profileMapping                bool
+	mappingKey                    string
 }
 
 func newConfigModel(c Config) configModel { return configModel{config: cloneConfig(c), original: c} }
@@ -113,9 +115,19 @@ func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		if m.screen == screenHostMappings {
-			hosts := sortedHostMappingKeys(m.config.HostMapping)
+			mapping := m.config.HostMapping
+			if m.profileMapping {
+				mapping = m.config.Cluster[m.profile].HostMapping
+			}
+			hosts := sortedHostMappingKeys(mapping)
 			if m.cursor < len(hosts) {
-				delete(m.config.HostMapping, hosts[m.cursor])
+				if m.profileMapping {
+					p := m.config.Cluster[m.profile]
+					delete(p.HostMapping, hosts[m.cursor])
+					m.config.Cluster[m.profile] = p
+				} else {
+					delete(m.config.HostMapping, hosts[m.cursor])
+				}
 				if m.cursor >= len(hosts)-1 {
 					m.cursor = len(hosts) - 2
 				}
@@ -142,10 +154,17 @@ func (m configModel) items() []string {
 	case screenShared:
 		return []string{fmt.Sprintf("Database name: %s", m.config.DBName), fmt.Sprintf("Authentication source: %s", m.config.AuthSource), "Back"}
 	case screenHostMappings:
-		hosts := sortedHostMappingKeys(m.config.HostMapping)
+		mapping := m.config.HostMapping
+		if m.profileMapping {
+			mapping = m.config.Cluster[m.profile].HostMapping
+		}
+		hosts := sortedHostMappingKeys(mapping)
 		items := make([]string, 0, len(hosts)+2)
 		for _, host := range hosts {
-			items = append(items, host+" → "+m.config.HostMapping[host])
+			items = append(items, host+" → "+mapping[host])
+		}
+		if m.profileMapping {
+			items = append(items, "Restore shared mapping inheritance")
 		}
 		return append(append(items, "Add mapping"), "Back")
 	case screenProfiles:
@@ -161,7 +180,11 @@ func (m configModel) items() []string {
 		if p.Password != "" {
 			pass = "<configured>"
 		}
-		return []string{"URI: " + redactURI(p.InitialURI), "Username: " + p.Username, "Password: " + pass, "Delete profile", "Back"}
+		mappingState := "override"
+		if p.HostMapping == nil {
+			mappingState = "inherit shared"
+		}
+		return []string{"URI: " + redactURI(p.InitialURI), "Username: " + p.Username, "Password: " + pass, "Host mappings (" + mappingState + ")", "Delete profile", "Back"}
 	}
 	return nil
 }
@@ -184,6 +207,7 @@ func (m *configModel) activate() tea.Cmd {
 		case 0:
 			m.screen = screenShared
 		case 1:
+			m.profileMapping = false
 			m.screen = screenHostMappings
 			m.cursor = 0
 		case 2:
@@ -213,15 +237,30 @@ func (m *configModel) activate() tea.Cmd {
 			m.cursor = 0
 		}
 	case screenHostMappings:
-		hosts := sortedHostMappingKeys(m.config.HostMapping)
-		if m.cursor < len(hosts) {
-			m.profile = hosts[m.cursor]
-			m.beginField("Host mapping value", m.config.HostMapping[m.profile], "host-value")
-		} else if m.cursor == len(hosts) {
+		mapping := m.config.HostMapping
+		if m.profileMapping {
+			mapping = m.config.Cluster[m.profile].HostMapping
+		}
+		hosts := sortedHostMappingKeys(mapping)
+		if m.profileMapping && m.cursor == len(hosts) {
+			p := m.config.Cluster[m.profile]
+			p.HostMapping = nil
+			m.config.Cluster[m.profile] = p
+			m.screen = screenProfile
+			m.cursor = 3
+		} else if m.cursor < len(hosts) {
+			m.mappingKey = hosts[m.cursor]
+			m.beginField("Host mapping value", mapping[m.mappingKey], "host-value")
+		} else if m.cursor == len(hosts)+boolInt(m.profileMapping) {
 			m.beginField("Host mapping key", "", "host-key")
 		} else {
-			m.screen = screenMain
-			m.cursor = 0
+			if m.profileMapping {
+				m.screen = screenProfile
+				m.cursor = 3
+			} else {
+				m.screen = screenMain
+				m.cursor = 0
+			}
 		}
 	case screenProfiles:
 		if m.cursor == len(m.config.Cluster) {
@@ -248,17 +287,27 @@ func (m *configModel) activate() tea.Cmd {
 		case 2:
 			m.beginField("Password", "", "password")
 		case 3:
+			m.profileMapping = true
+			m.screen = screenHostMappings
+			m.cursor = 0
+		case 4:
 			if len(m.config.Cluster) > 1 {
 				m.screen = screenConfirm
 			} else {
 				m.errorText = "Cannot delete the final profile."
 			}
-		case 4:
+		case 5:
 			m.screen = screenProfiles
 			m.cursor = 0
 		}
 	}
 	return nil
+}
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 func (m *configModel) beginField(label, value, field string) {
 	m.previous = m.screen
@@ -302,11 +351,15 @@ func (m *configModel) commitField() {
 			m.errorText = "Host mapping key cannot be blank."
 			return
 		}
-		if _, exists := m.config.HostMapping[m.value]; exists {
+		mapping := m.config.HostMapping
+		if m.profileMapping {
+			mapping = m.config.Cluster[m.profile].HostMapping
+		}
+		if _, exists := mapping[m.value]; exists {
 			m.errorText = "Host mapping key already exists."
 			return
 		}
-		m.profile = m.value
+		m.mappingKey = m.value
 		m.screen = m.previous
 		m.beginField("Host mapping value", "", "host-new-value")
 		return
@@ -315,16 +368,32 @@ func (m *configModel) commitField() {
 			m.errorText = "Host mapping value cannot be blank."
 			return
 		}
-		if m.config.HostMapping == nil {
-			m.config.HostMapping = make(map[string]string)
+		mapping := m.config.HostMapping
+		if m.profileMapping {
+			p := m.config.Cluster[m.profile]
+			if p.HostMapping == nil {
+				p.HostMapping = map[string]string{}
+			}
+			mapping = p.HostMapping
+			m.config.Cluster[m.profile] = p
 		}
-		m.config.HostMapping[m.profile] = m.value
+		if mapping == nil {
+			mapping = make(map[string]string)
+			m.config.HostMapping = mapping
+		}
+		mapping[m.mappingKey] = m.value
 	case "host-value":
 		if strings.TrimSpace(m.value) == "" {
 			m.errorText = "Host mapping value cannot be blank."
 			return
 		}
-		m.config.HostMapping[m.profile] = m.value
+		if m.profileMapping {
+			p := m.config.Cluster[m.profile]
+			p.HostMapping[m.mappingKey] = m.value
+			m.config.Cluster[m.profile] = p
+		} else {
+			m.config.HostMapping[m.mappingKey] = m.value
+		}
 	}
 	m.screen = m.previous
 	m.value = ""
@@ -336,6 +405,13 @@ func (m configModel) View() string {
 	titles := map[configScreen]string{screenMain: "Configuration", screenShared: "Shared settings", screenHostMappings: "Host mappings", screenProfiles: "Cluster profiles", screenProfile: "Profile: " + m.profile, screenEditField: "Edit setting", screenConfirm: "Delete profile?"}
 	var b strings.Builder
 	b.WriteString(titles[m.screen] + "\n\n")
+	if m.screen == screenHostMappings && m.profileMapping {
+		if m.config.Cluster[m.profile].HostMapping == nil {
+			b.WriteString("Inheriting shared mappings; add a mapping to create a profile override.\n")
+		} else {
+			b.WriteString("Profile override (replaces shared mappings)\n")
+		}
+	}
 	if m.screen == screenEditField {
 		display := m.value
 		if m.field == "password" {

@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -30,9 +31,14 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) (string, error
 			headings = append(headings, "Total")
 		}
 		var table strings.Builder
-		var writer *tabwriter.Writer
+		var writer *tablewriter.Table
+		headerWritten := false
 		if !markdown {
-			writer = tabwriter.NewWriter(&table, 0, 4, 2, ' ', 0)
+			writer = tablewriter.NewTable(&table, tablewriter.WithMaxWidth(80), tablewriter.WithHeaderAutoWrap(tw.WrapBreak), tablewriter.WithHeaderMaxWidth(24), tablewriter.WithRowAutoWrap(tw.WrapBreak), tablewriter.WithRowMaxWidth(24))
+			writer.Configure(func(c *tablewriter.Config) {
+				c.Header.Formatting.AutoFormat = tw.Off
+				c.Row.Formatting.AutoFormat = tw.Off
+			})
 		}
 		writeRow := func(cells []string) error {
 			if markdown {
@@ -43,17 +49,18 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) (string, error
 				_, err := fmt.Fprintf(&table, "| %s |\n", strings.Join(escaped, " | "))
 				return err
 			} else {
+				clean := make([]string, len(cells))
 				for i, c := range cells {
-					if i > 0 {
-						if _, err := fmt.Fprint(writer, "\t| "); err != nil {
-							return err
-						}
-					}
-					if _, err := fmt.Fprint(writer, strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(c)); err != nil {
-						return err
-					}
+					clean[i] = strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(c)
 				}
-				if _, err := fmt.Fprintln(writer); err != nil {
+				if !headerWritten {
+					header := make([]any, len(clean))
+					for i := range clean {
+						header[i] = clean[i]
+					}
+					writer.Header(header...)
+					headerWritten = true
+				} else if err := writer.Append(clean); err != nil {
 					return err
 				}
 			}
@@ -89,7 +96,7 @@ func renderTables(rows []IndexUsage, nodes []Node, markdown bool) (string, error
 			}
 		}
 		if writer != nil {
-			if err := writer.Flush(); err != nil {
+			if err := writer.Render(); err != nil {
 				return "", err
 			}
 		}

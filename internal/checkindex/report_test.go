@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -102,6 +103,98 @@ func TestPartialFailureCleanupAndExplicitSystemCollection(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "sensitive") {
 		t.Fatal("raw driver error leaked")
+	}
+}
+
+func TestStatsFailureIncludesSafeNodeContext(t *testing.T) {
+	seed := &fakeDB{statusErr: errors.New("standalone")}
+	node := &fakeDB{statsErr: errors.New("$indexStats unauthorized")}
+	var out bytes.Buffer
+	err := collect(context.Background(), Profile{DBName: "db", Credentials: Credentials{InitialURI: "mongodb://user:secret@localhost:27017/db?authSource=secret"}}, Options{Collection: "contacts"}, &out, func(_ context.Context, _ Profile, host string) (Database, error) {
+		if host == "" {
+			return seed, nil
+		}
+		return node, nil
+	})
+	if err == nil {
+		t.Fatal("expected partial error")
+	}
+	text := out.String() + err.Error()
+	for _, want := range []string{"localhost:27017", "contacts", "$indexStats", "unauthorized"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q from diagnostic: %s", want, text)
+		}
+	}
+	for _, secret := range []string{"user", "secret", "mongodb://"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("credential material %q leaked: %s", secret, text)
+		}
+	}
+}
+
+func TestConsoleTablePreservesLongValues(t *testing.T) {
+	longKey := strings.Repeat("long_key_", 20)
+	rows := []IndexUsage{{Name: strings.Repeat("index_label_", 10), Key: bson.D{{Key: longKey, Value: 1}}, Total: 3, PerNode: map[string]int64{"node-label-that-is-long": 3}}}
+	text, err := renderTables(rows, []Node{{Name: "node-label-that-is-long", Role: "PRIMARY"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		column int
+		value  string
+	}{{1, rows[0].Name}, {2, longKey}, {3, "node-label-that-is-long"}, {4, "3"}} {
+		if !strings.Contains(consoleTableColumn(text, check.column), check.value) {
+			t.Fatalf("table lost %q in column %d: %s", check.value, check.column, text)
+		}
+	}
+}
+
+func TestConsoleTableWrapsLongValuesWithinWidth(t *testing.T) {
+	longKey := strings.Repeat("long_key_", 20)
+	longName := strings.Repeat("index_label_", 10)
+	nodes := []Node{{Name: "long-primary-node", Role: "PRIMARY"}, {Name: "long-secondary-node", Role: "SECONDARY"}}
+	text, err := renderTables([]IndexUsage{{Name: longName, Key: bson.D{{Key: longKey, Value: 1}}, Total: 5, PerNode: map[string]int64{nodes[0].Name: 2, nodes[1].Name: 3}}}, nodes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected wrapped rows: %s", text)
+	}
+	for _, line := range lines {
+		if width := utf8.RuneCountInString(line); width > 80 {
+			t.Fatalf("line exceeds configured display width: %d: %q", width, line)
+		}
+	}
+	for _, check := range []struct {
+		column int
+		value  string
+	}{{1, longName}, {2, longKey}, {3, nodes[0].Name}, {4, nodes[1].Name}, {5, "5"}} {
+		if strings.Count(consoleTableColumn(text, check.column), check.value) != 1 {
+			t.Fatalf("value should occur once in column %d: %q", check.column, check.value)
+		}
+	}
+}
+
+func consoleTableColumn(text string, column int) string {
+	var content strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		cells := strings.Split(line, "│")
+		if len(cells) > column {
+			content.WriteString(strings.ReplaceAll(strings.TrimSpace(cells[column]), "↩", ""))
+		}
+	}
+	return content.String()
+}
+
+func TestMarkdownTableDoesNotWrapCells(t *testing.T) {
+	name := strings.Repeat("markdown_name_", 10)
+	text, err := renderTables([]IndexUsage{{Name: name, Key: bson.D{{Key: "key", Value: 1}}}}, []Node{{Name: "node", Role: "PRIMARY"}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "| "+name+" | ") || strings.Count(text, "| ") < 4 {
+		t.Fatalf("markdown pipe table changed: %s", text)
 	}
 }
 

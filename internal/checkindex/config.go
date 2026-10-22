@@ -14,9 +14,10 @@ import (
 
 // Credentials contains the connection settings for a configured cluster.
 type Credentials struct {
-	InitialURI string `json:"initialUri"`
-	Username   string `json:"username"`
-	Password   string `json:"password"`
+	InitialURI  string            `json:"initialUri"`
+	Username    string            `json:"username"`
+	Password    string            `json:"password"`
+	HostMapping map[string]string `json:"hostMapping"`
 }
 
 // Config is the on-disk configuration for shared settings and cluster profiles.
@@ -35,7 +36,7 @@ type Profile struct {
 }
 
 func defaultConfig() Config {
-	return Config{DBName: "database", AuthSource: "admin", HostMapping: map[string]string{"mongo:27017": "localhost:27017"}, Cluster: map[string]Credentials{"": {}}}
+	return Config{DBName: "database", AuthSource: "admin", HostMapping: map[string]string{}, Cluster: map[string]Credentials{"": {}}}
 }
 
 func loadConfig(path string) (Config, error) {
@@ -102,13 +103,21 @@ func decodeConfig(data []byte) (Config, error) {
 	if json.Unmarshal(data, &shape) != nil {
 		return c, errors.New("cluster profiles must be objects")
 	}
-	for _, profile := range shape.Cluster {
+	for name, profile := range shape.Cluster {
 		if profile == nil {
 			return c, errors.New("cluster profiles must be objects, not null")
 		}
-		for _, value := range profile {
+		for key, value := range profile {
+			if key == "hostMapping" && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				continue
+			}
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 				return c, errors.New("cluster fields must be strings, not null")
+			}
+		}
+		for k, v := range c.Cluster[name].HostMapping {
+			if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+				return c, errors.New("profile hostMapping requires nonempty hosts")
 			}
 		}
 	}
@@ -146,5 +155,9 @@ func (c Config) selectProfile(name string, password *string) (Profile, error) {
 	if !strings.HasPrefix(p.InitialURI, "mongodb://") && !strings.HasPrefix(p.InitialURI, "mongodb+srv://") {
 		return Profile{}, errors.New("selected cluster initialUri must be a MongoDB URI")
 	}
-	return Profile{Credentials: p, Name: name, DBName: c.DBName, AuthSource: c.AuthSource, HostMapping: c.HostMapping}, nil
+	mappings := p.HostMapping
+	if mappings == nil {
+		mappings = c.HostMapping
+	}
+	return Profile{Credentials: p, Name: name, DBName: c.DBName, AuthSource: c.AuthSource, HostMapping: mappings}, nil
 }

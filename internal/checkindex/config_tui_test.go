@@ -196,3 +196,94 @@ func TestConfigTUIHostMappingsCanBeViewedEditedAndRemoved(t *testing.T) {
 		t.Fatalf("remove mapping failed: %#v", m.config.HostMapping)
 	}
 }
+
+func TestConfigTUIProfileMappingsCanOverrideEditRemoveAndInherit(t *testing.T) {
+	m := newConfigModel(Config{HostMapping: map[string]string{"mongo:27017": "localhost:27017"}, Cluster: map[string]Credentials{"local": {}}})
+	press := func(key tea.KeyType, runes ...rune) {
+		t.Helper()
+		next, _ := m.Update(tea.KeyMsg{Type: key, Runes: runes})
+		m = next.(configModel)
+	}
+	m.screen, m.profile = screenProfile, "local"
+	m.cursor = 3
+	press(tea.KeyEnter)
+	if !strings.Contains(m.View(), "Inheriting shared mappings") {
+		t.Fatal("profile editor does not identify inherited mapping mode")
+	}
+	press(tea.KeyRunes, 'a')
+	for _, r := range "mongo:27017" {
+		press(tea.KeyRunes, r)
+	}
+	press(tea.KeyEnter)
+	for _, r := range "mongo:27017" {
+		press(tea.KeyRunes, r)
+	}
+	press(tea.KeyEnter)
+	if got := m.config.Cluster["local"].HostMapping["mongo:27017"]; got != "mongo:27017" {
+		t.Fatalf("profile mapping=%q", got)
+	}
+	if !strings.Contains(m.View(), "Profile override") {
+		t.Fatal("adding a mapping did not enter override mode")
+	}
+	if got := m.config.HostMapping["mongo:27017"]; got != "localhost:27017" {
+		t.Fatalf("shared mapping changed: %q", got)
+	}
+	m.cursor = 0
+	press(tea.KeyEnter)
+	for range "mongo:27017" {
+		press(tea.KeyBackspace)
+	}
+	for _, r := range "mongo.internal:27017" {
+		press(tea.KeyRunes, r)
+	}
+	press(tea.KeyEnter)
+	if got := m.config.Cluster["local"].HostMapping["mongo:27017"]; got != "mongo.internal:27017" {
+		t.Fatalf("edited profile mapping=%q", got)
+	}
+	if got := m.config.HostMapping["mongo:27017"]; got != "localhost:27017" {
+		t.Fatalf("editing profile mapping changed shared value: %q", got)
+	}
+	m.cursor = len(m.items()) - 1
+	press(tea.KeyEnter) // Back to profile menu.
+	if m.screen != screenProfile {
+		t.Fatalf("screen=%v, want profile", m.screen)
+	}
+	m.cursor = 3
+	press(tea.KeyEnter)
+	press(tea.KeyRunes, 'd')
+	if len(m.config.Cluster["local"].HostMapping) != 0 {
+		t.Fatal("profile mapping was not removed")
+	}
+	// The override remains an explicit empty object until inheritance is restored.
+	items := m.items()
+	for i, item := range items {
+		if item == "Restore shared mapping inheritance" {
+			m.cursor = i
+			break
+		}
+	}
+	press(tea.KeyEnter)
+	if m.config.Cluster["local"].HostMapping != nil {
+		t.Fatal("profile mapping did not restore inheritance")
+	}
+	if got := m.config.HostMapping["mongo:27017"]; got != "localhost:27017" {
+		t.Fatalf("shared mapping changed: %q", got)
+	}
+}
+
+func TestConfigTUIOpeningAndLeavingInheritedMappingsDoesNotCreateOverride(t *testing.T) {
+	m := newConfigModel(Config{HostMapping: map[string]string{"mongo:27017": "localhost:27017"}, Cluster: map[string]Credentials{"local": {}}})
+	press := func(key tea.KeyType) { t.Helper(); next, _ := m.Update(tea.KeyMsg{Type: key}); m = next.(configModel) }
+	m.screen, m.profile, m.cursor = screenProfile, "local", 3
+	press(tea.KeyEnter)
+	if m.config.Cluster["local"].HostMapping != nil {
+		t.Fatal("opening inherited mapping editor created an override")
+	}
+	press(tea.KeyEsc)
+	if m.config.Cluster["local"].HostMapping != nil {
+		t.Fatal("leaving mapping editor without edits created an override")
+	}
+	if got := m.config.HostMapping["mongo:27017"]; got != "localhost:27017" {
+		t.Fatalf("shared mapping changed: %q", got)
+	}
+}
