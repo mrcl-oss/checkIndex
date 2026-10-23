@@ -253,7 +253,14 @@ func TestJSONReportIsPureAndUsesExactNumericCounts(t *testing.T) {
 	}
 	collection := parsed["items"].(map[string]any)
 	index := collection["ix"].(map[string]any)
-	if len(collection) != 1 || index["production"] != json.Number("9007199254740993") || index["total"] != json.Number("9007199254740993") || len(index) != 2 {
+	clusters, ok := index["clusters"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing clusters/node schema: %s", out.String())
+	}
+	cluster := clusters["production"].(map[string]any)
+	nodes := cluster["nodes"].(map[string]any)
+	n := nodes["node"].(map[string]any)
+	if len(collection) != 1 || n["count"] != json.Number("9007199254740993") || n["primary"] != false || cluster["total"] != json.Number("9007199254740993") || index["total"] != json.Number("9007199254740993") || len(index) != 2 {
 		t.Fatalf("unexpected direct nesting or numeric values: %#v", parsed)
 	}
 }
@@ -279,11 +286,11 @@ func TestJSONFileContainsDocumentAndConsoleStaysClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded map[string]map[string]map[string]int64
+	var decoded jsonReport
 	if err = json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("invalid file JSON: %s", data)
 	}
-	if len(decoded) != 1 || len(decoded["items"]) != 1 || len(decoded["items"]["ix"]) != 2 || decoded["items"]["ix"]["direct"] != 4 || decoded["items"]["ix"]["total"] != 4 {
+	if len(decoded) != 1 || len(decoded["items"]) != 1 || decoded["items"]["ix"].Clusters["direct"].Nodes["node"].Count != 4 || decoded["items"]["ix"].Total != 4 {
 		t.Fatalf("unexpected file schema: %s", data)
 	}
 }
@@ -306,11 +313,12 @@ func TestJSONPartialFailurePreservesSuccessfulNodeData(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected partial error")
 	}
-	var decoded map[string]map[string]map[string]int64
+	var decoded jsonReport
 	if e := json.Unmarshal(out.Bytes(), &decoded); e != nil {
 		t.Fatalf("invalid JSON: %v", e)
 	}
-	if decoded["items"]["ix"]["cluster"] != 5 || decoded["items"]["ix"]["total"] != 5 || len(decoded) != 1 {
+	cluster := decoded["items"]["ix"].Clusters["cluster"]
+	if cluster.Total != 5 || len(cluster.Nodes) != 1 || !cluster.Nodes["a"].Primary || decoded["items"]["ix"].Total != 5 || len(decoded) != 1 {
 		t.Fatalf("partial data lost: %+v", decoded)
 	}
 }
@@ -451,7 +459,7 @@ func TestCollectNodeStatsOverlapAndPartialCleanup(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if got["items"]["ix"]["direct"] != 7 {
+	if got["items"]["ix"].Clusters["direct"].Total != 7 {
 		t.Fatalf("successful node data lost: %v", got)
 	}
 }

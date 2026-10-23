@@ -15,16 +15,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mrcl-oss/checkIndex/internal/reportdata"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-type jsonReport map[string]map[string]map[string]int64
+type jsonReport = map[string]reportdata.Collection
 
 var ErrPartialReport = errors.New("report is partial; one or more node queries failed")
 
 // CollectReport runs the same collector used by the CLI, returning its JSON representation.
 func CollectReport(ctx context.Context, p Profile, collection string, out io.Writer) error {
 	return collect(ctx, p, Options{Collection: collection, JSON: true}, out, dialMongo)
+}
+
+// CollectData returns typed observations without a JSON round trip.
+func CollectData(ctx context.Context, p Profile, collection string) (reportdata.Report, error) {
+	return collectData(ctx, p, collection, dialMongo)
+}
+
+func collectData(ctx context.Context, p Profile, collection string, dial Dial) (reportdata.Report, error) {
+	r := reportdata.Report{Collections: make(jsonReport)}
+	err := collectInto(ctx, p, Options{Collection: collection, JSON: true}, nil, dial, r.Collections)
+	r.Partial = err != nil
+	return r, err
 }
 
 // Node identifies a MongoDB data node and its topology role.
@@ -133,10 +146,13 @@ func addOps(a, b int64) (int64, error) {
 }
 
 func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial) error {
+	return collectInto(ctx, p, o, out, dial, make(jsonReport))
+}
+
+func collectInto(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial, result jsonReport) error {
 	if p.Name == "" {
 		p.Name = "direct"
 	}
-	result := make(jsonReport)
 	var opened []Database
 	defer func() {
 		for _, db := range opened {
@@ -239,7 +255,7 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 
 	type collectionResult struct {
 		name        string
-		jsonIndexes map[string]map[string]int64
+		jsonIndexes reportdata.Collection
 		total       int64
 		err         error
 		failed      bool
@@ -300,20 +316,32 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 							res.err = addErr
 							return res
 						}
-						entry.PerNode[n.Name] = s.Accesses.Ops
+						entry.PerNode[n.Name], addErr = addOps(entry.PerNode[n.Name], s.Accesses.Ops)
+						if addErr != nil {
+							res.err = addErr
+							return res
+						}
 					}
 				}
 
 				rows := make([]IndexUsage, 0, len(usage))
-				res.jsonIndexes = make(map[string]map[string]int64, len(usage))
+				res.jsonIndexes = make(reportdata.Collection, len(usage))
 				for _, v := range usage {
 					rows = append(rows, *v)
-					res.jsonIndexes[v.Name] = map[string]int64{p.Name: v.Total, "total": v.Total}
-					var addErr error
-					res.total, addErr = addOps(res.total, v.Total)
-					if addErr != nil {
-						res.err = addErr
-						return res
+					observed := make(map[string]reportdata.NodeUsage, len(v.PerNode))
+					for _, n := range nodes {
+						if count, ok := v.PerNode[n.Name]; ok {
+							observed[n.Name] = reportdata.NodeUsage{Count: count, Primary: n.Role == "PRIMARY"}
+						}
+					}
+					res.jsonIndexes[v.Name] = reportdata.Index{Clusters: map[string]reportdata.Cluster{p.Name: {Nodes: observed, Total: v.Total}}, Total: v.Total}
+					if !o.JSON {
+						var addErr error
+						res.total, addErr = addOps(res.total, v.Total)
+						if addErr != nil {
+							res.err = addErr
+							return res
+						}
 					}
 				}
 
@@ -351,9 +379,12 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 
 	var markdown strings.Builder
 	var grandTotal int64
+	var failures []error
 	for _, res := range results {
 		if res.err != nil {
-			return res.err
+			failed = true
+			failures = append(failures, fmt.Errorf("collection %q: %w", res.name, res.err))
+			continue
 		}
 		if res.failed {
 			failed = true
@@ -382,6 +413,12 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		}
 	}
 	if o.JSON {
+		if out == nil {
+			if failed {
+				return errors.Join(append(failures, ErrPartialReport)...)
+			}
+			return nil
+		}
 		encoded, encodeErr := json.Marshal(result)
 		if encodeErr != nil {
 			return encodeErr
@@ -394,7 +431,7 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			return err
 		}
 		if failed {
-			return ErrPartialReport
+			return errors.Join(append(failures, ErrPartialReport)...)
 		}
 		return nil
 	}
@@ -416,7 +453,7 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 		}
 	}
 	if failed {
-		return ErrPartialReport
+		return errors.Join(append(failures, ErrPartialReport)...)
 	}
 	return nil
 }

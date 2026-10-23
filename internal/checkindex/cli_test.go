@@ -119,9 +119,9 @@ func TestCLIAllJSONCombinesProfilesAndIgnoresOverrides(t *testing.T) {
 			t.Fatalf("flags not handled: %+v", o)
 		}
 		if o.Collection == "contacts" {
-			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"%s":2,"total":2},"index-%s":{"%s":3,"total":3}}}`, p.Name, p.Name, p.Name)
+			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"clusters":{"%s":{"nodes":{"node":{"count":2,"primary":true}},"total":2}},"total":2},"index-%s":{"clusters":{"%s":{"nodes":{"node":{"count":3,"primary":false}},"total":3}},"total":3}}}`, p.Name, p.Name, p.Name)
 		} else {
-			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"%s":2,"total":2},"index-%s":{"%s":3,"total":3}},"other":{"not-contact":{"%s":9,"total":9}}}`, p.Name, p.Name, p.Name, p.Name)
+			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"clusters":{"%s":{"nodes":{"node":{"count":2,"primary":true}},"total":2}},"total":2},"index-%s":{"clusters":{"%s":{"nodes":{"node":{"count":3,"primary":false}},"total":3}},"total":3}},"other":{"not-contact":{"clusters":{"%s":{"nodes":{"node":{"count":9,"primary":false}},"total":9}},"total":9}}}`, p.Name, p.Name, p.Name, p.Name)
 		}
 		return nil
 	})
@@ -142,10 +142,11 @@ func TestCLIAllJSONCombinesProfilesAndIgnoresOverrides(t *testing.T) {
 	shared := contacts["shared"].(map[string]any)
 	indexA := contacts["index-a"].(map[string]any)
 	indexZ := contacts["index-z"].(map[string]any)
-	if len(contacts) != 3 || len(shared) != 3 || shared["a"] != float64(2) || shared["z"] != float64(2) || shared["total"] != float64(4) {
+	clusters, ok := shared["clusters"].(map[string]any)
+	if len(contacts) != 3 || len(shared) != 2 || !ok || len(clusters) != 2 || shared["total"] != float64(4) {
 		t.Fatalf("same index counts/total not combined: %#v", contacts)
 	}
-	if len(indexA) != 2 || indexA["a"] != float64(3) || indexA["total"] != float64(3) || len(indexZ) != 2 || indexZ["z"] != float64(3) || indexZ["total"] != float64(3) {
+	if len(indexA) != 2 || indexA["clusters"] == nil || indexA["total"] != float64(3) || len(indexZ) != 2 || indexZ["clusters"] == nil || indexZ["total"] != float64(3) {
 		t.Fatalf("distinct index keys not preserved: %#v", contacts)
 	}
 }
@@ -163,10 +164,13 @@ func TestCLIAllForwardsCollectionForTextAndJSON(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			got := make([]string, 0, 2)
-			err := run(tc.args, home, io.Discard, func(_ context.Context, _ Profile, options Options, _ io.Writer) error {
+			err := run(tc.args, home, io.Discard, func(_ context.Context, _ Profile, options Options, w io.Writer) error {
 				mu.Lock()
 				got = append(got, options.Collection)
 				mu.Unlock()
+				if options.JSON {
+					_, _ = io.WriteString(w, "{}")
+				}
 				return nil
 			})
 			mu.Lock()

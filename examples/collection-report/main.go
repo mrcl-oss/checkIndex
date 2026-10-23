@@ -58,8 +58,14 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	for index, counts := range indexes {
-		fmt.Printf("%s: %v\n", index, counts)
+	for name, index := range indexes {
+		fmt.Printf("%s: total=%d\n", name, index.Total)
+		for clusterName, cluster := range index.Clusters {
+			fmt.Printf("  %s: total=%d\n", clusterName, cluster.Total)
+			for nodeName, node := range cluster.Nodes {
+				fmt.Printf("    %s: count=%d primary=%t\n", nodeName, node.Count, node.Primary)
+			}
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "collection error: %v\n", err)

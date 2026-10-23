@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	internal "github.com/mrcl-oss/checkIndex/internal/checkindex"
+	"github.com/mrcl-oss/checkIndex/internal/reportdata"
 )
 
 // Profile selects a saved profile or describes a direct connection. Secrets are
@@ -20,24 +21,28 @@ type Profile struct {
 	HostMapping                                         map[string]string
 }
 
-// Index contains operation counts observed on each data node.
-type Index map[string]int64
+// NodeUsage contains an exact counter and the discovered node's primary status.
+type NodeUsage = reportdata.NodeUsage
 
-// Collection maps index names to node usage counts.
-type Collection map[string]Index
+// Cluster contains observed nodes and their total operation count.
+type Cluster = reportdata.Cluster
 
-// Report describes the available results; partial is true when collection was incomplete.
-type Report struct {
-	Collections map[string]Collection `json:"-"`
-	Partial     bool                  `json:"-"`
-}
+// Index contains cluster observations and their total operation count.
+type Index = reportdata.Index
 
-func (r Report) MarshalJSON() ([]byte, error) { return json.Marshal(r.Collections) }
+// Collection maps index names to observations.
+type Collection = reportdata.Collection
+
+// Report describes available results. Partial indicates incomplete collection.
+// JSON contains only the collection map, without a metadata wrapper.
+type Report = reportdata.Report
 
 // Options configures collection. ProfileName selects a local profile. Otherwise,
 // the direct fields are preferred; Direct is retained for compatibility. Do not
-// combine ProfileName, direct fields, and Direct. Collection may be empty.
+// combine All, ProfileName, direct fields, and Direct. Collection may be empty,
+// a collection name, or comma-separated names; it also applies when All is true.
 type Options struct {
+	All                                           bool
 	ProfileName                                   string
 	Direct                                        Profile
 	Collection                                    string
@@ -45,15 +50,24 @@ type Options struct {
 	HostMapping                                   map[string]string
 }
 
-// Collect uses a named local configuration profile or a direct profile. A
+// Collect uses all configured profiles, a named local profile, or a direct profile. A
 // report is always defined; on errors it contains any output collected so far.
 func Collect(ctx context.Context, options Options) (Report, error) {
+	return collectWith(ctx, options, internal.CollectData)
+}
+
+func collectWith(ctx context.Context, options Options, collector internal.DataCollector) (Report, error) {
 	r := Report{Collections: map[string]Collection{}}
+	flat := options.URI != "" || options.Username != "" || options.Password != "" || options.Database != "" || options.AuthSource != "" || options.HostMapping != nil
+	p := options.Direct
+	direct := p.Name != "" || p.URI != "" || p.Username != "" || p.Password != "" || p.Database != "" || p.AuthSource != "" || p.HostMapping != nil
+	named := strings.TrimSpace(options.ProfileName) != ""
+	if (options.All && (named || flat || direct)) || (named && (flat || direct)) || (flat && direct) {
+		return r, errors.New("use only one of All, ProfileName, direct options, or Direct profile")
+	}
+	r.Partial = options.All
 	var profile internal.Profile
-	if strings.TrimSpace(options.ProfileName) != "" {
-		if options.URI != "" || options.Username != "" || options.Password != "" || options.Database != "" || options.AuthSource != "" || options.HostMapping != nil || options.Direct.URI != "" || options.Direct.Username != "" || options.Direct.Password != "" || options.Direct.Database != "" || options.Direct.AuthSource != "" || options.Direct.HostMapping != nil {
-			return r, errors.New("use either ProfileName or direct connection options, not both")
-		}
+	if options.All || named {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return r, errors.New("resolve home directory")
@@ -62,16 +76,15 @@ func Collect(ctx context.Context, options Options) (Report, error) {
 		if err != nil {
 			return r, errors.New("load configured profile")
 		}
+		if options.All {
+			return internal.CollectConfigured(ctx, config, options.Collection, collector)
+		}
 		profile, err = config.SelectProfile(options.ProfileName, nil)
 		if err != nil {
 			return r, errors.New("select configured profile")
 		}
 	} else {
-		p := options.Direct
-		if options.URI != "" || options.Username != "" || options.Password != "" || options.Database != "" || options.AuthSource != "" || options.HostMapping != nil {
-			if p.Name != "" || p.URI != "" || p.Username != "" || p.Password != "" || p.Database != "" || p.AuthSource != "" || p.HostMapping != nil {
-				return r, errors.New("use either direct options or Direct profile, not both")
-			}
+		if flat {
 			p = Profile{URI: options.URI, Username: options.Username, Password: options.Password, Database: options.Database, AuthSource: options.AuthSource, HostMapping: options.HostMapping}
 		}
 		if strings.TrimSpace(p.URI) == "" || strings.TrimSpace(p.Username) == "" || strings.TrimSpace(p.Password) == "" || strings.TrimSpace(p.Database) == "" || strings.TrimSpace(p.AuthSource) == "" {
@@ -80,19 +93,13 @@ func Collect(ctx context.Context, options Options) (Report, error) {
 		if !strings.HasPrefix(p.URI, "mongodb://") && !strings.HasPrefix(p.URI, "mongodb+srv://") {
 			return r, errors.New("direct URI must be a MongoDB URI")
 		}
-		profile = internal.Profile{Credentials: internal.Credentials{InitialURI: p.URI, Username: p.Username, Password: p.Password}, DBName: p.Database, AuthSource: p.AuthSource, HostMapping: p.HostMapping}
-	}
-	var b strings.Builder
-	err := internal.CollectReport(ctx, profile, options.Collection, &b)
-	var values map[string]map[string]map[string]int64
-	_ = json.Unmarshal([]byte(b.String()), &values)
-	for collection, indexes := range values {
-		r.Collections[collection] = make(Collection, len(indexes))
-		for index, counts := range indexes {
-			r.Collections[collection][index] = Index(counts)
+		if p.Name == "" {
+			p.Name = "direct"
 		}
+		profile = internal.Profile{Credentials: internal.Credentials{InitialURI: p.URI, Username: p.Username, Password: p.Password}, Name: p.Name, DBName: p.Database, AuthSource: p.AuthSource, HostMapping: p.HostMapping}
 	}
-	r.Partial = errors.Is(err, internal.ErrPartialReport)
+	r, err := collector(ctx, profile, options.Collection)
+	r.Partial = r.Partial || err != nil
 	if r.Collections == nil {
 		r.Collections = map[string]Collection{}
 	}
