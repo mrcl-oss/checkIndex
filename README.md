@@ -130,6 +130,27 @@ Example structure (replace placeholders locally; do not commit credentials):
 
 Cluster profile names are user-defined. Each profile needs an `initialUri`, `username`, and `password`. Use `mongodb://` or `mongodb+srv://` URIs. A profile-level `hostMapping` fully replaces the top-level shared mapping: omitted or `null` inherits the shared map, while `{}` explicitly disables it. This lets profiles map the same discovered address differently. Newly generated starter configs have an empty shared mapping.
 
+### Go configuration API
+
+Go programs can use the public `config` package without invoking the CLI:
+
+```go
+import "github.com/mrcl-oss/checkIndex/config"
+
+func updateConfig() error {
+	cfg, err := config.LoadConfig("/path/to/config.json")
+	if err != nil {
+		return err
+	}
+	if err := config.ValidateConfig(cfg); err != nil {
+		return err
+	}
+	return config.SaveConfig("/path/to/config.json", cfg)
+}
+```
+
+`config.Config` and `config.Credentials` expose the existing JSON schema. `SaveConfig` validates and writes atomically with restrictive file permissions.
+
 ### Interactive configuration editor
 
 Run this from an interactive terminal:

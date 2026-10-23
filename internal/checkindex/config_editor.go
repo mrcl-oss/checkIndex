@@ -353,6 +353,9 @@ func validateConfig(c Config) error {
 	return e
 }
 
+// ValidateConfig validates a configuration using the same schema rules as the CLI.
+func ValidateConfig(c Config) error { return validateConfig(c) }
+
 func saveConfig(path string, c Config) (resultErr error) {
 	if err := validateConfig(c); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
@@ -413,6 +416,9 @@ func saveConfig(path string, c Config) (resultErr error) {
 	}
 	return nil
 }
+
+// SaveConfig validates and safely persists a configuration using the CLI writer.
+func SaveConfig(path string, c Config) error { return saveConfig(path, c) }
 
 func runConfigCommand(home string, input io.Reader, output io.Writer, passwords passwordReader) error {
 	if passwords == nil {
