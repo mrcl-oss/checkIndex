@@ -175,24 +175,85 @@ checkindex --cluster production --json --file indexes.json
 
 # Combine every configured profile into one JSON document
 checkindex --all --json
+
+# Select the same collection (or comma-separated collections) in every profile
+checkindex --all --json --collection orders
 ```
 
 `--cluster` selects a profile from the config. If omitted, the alphabetically first named profile is selected.
 
-`--all` reports every configured cluster profile in alphabetical order, labeling each report with its profile name. In this mode, all other report and connection options are ignored (including `--cluster`, direct connection overrides, `--collection`, `--file`, and `--hostMapping`); reports go to standard output. Profile/report failures do not stop later profiles, but any failure makes the command exit nonzero.
+`--all` collects configured profiles concurrently and combines results in alphabetical profile order. Text reports are labeled with the profile name. `--collection` (including comma-separated names) filters each profile; without it, all non-system collections are included. `--json` selects one combined JSON document. Other connection/output options are ignored in this mode (including `--cluster`, direct connection overrides, `--file`, and `--hostMapping`); reports go to standard output. Profile/report failures do not stop other profiles, but any failure makes the command exit nonzero.
 
-`--json` emits direct collection → index → profile/count nesting, with numeric profile counts and a numeric `total` per index. For example: `{ "items": { "ix": { "production": 123, "total": 123 } } }`. A direct connection uses the profile key `direct`. No wrapper or partial-status fields are included in JSON; failures are reported through the command error. JSON written to stdout contains no progress output; diagnostics are sent to stderr. With `--file`, JSON is written instead of Markdown. `--all --json` emits one combined document in the same shape, keyed by configured profile names.
+### JSON schema
 
-Runnable Go API examples are in [`examples/`](examples/). Both use typed direct options and do not need a local profile:
+Every JSON selection—one/all profiles and one/all collections—uses collection → index → `clusters` → cluster → `nodes` → discovered node name:
+
+```json
+{
+  "items": {
+    "ix": {
+      "clusters": {
+        "production": {
+          "nodes": {
+            "mongo.internal:27017": {"count": 123, "primary": true},
+            "mongo2.internal:27017": {"count": 7, "primary": false}
+          },
+          "total": 130
+        }
+      },
+      "total": 130
+    }
+  }
+}
+```
+
+Counts and totals are checked `int64` values (including values above JavaScript's exact integer range). Cluster totals sum node counts; index totals sum cluster totals. Matching collection/index/cluster/node names merge by name. Node keys retain discovered identity, not host-mapping destinations. `primary` is true only for a discovered PRIMARY, not a secondary or standalone. Missing/failed nodes are omitted, not invented as zero. Empty maps encode as `{}`.
+
+A direct connection uses the cluster name `direct` (or `report.Profile.Name` in the Go API). There is no wrapper or partial-status field. Errors signal incomplete reports while retaining available data. JSON stdout contains no progress messages; command diagnostics go to stderr. For single-profile runs, `--json --file` writes JSON instead of Markdown; `--all` always uses stdout. This report schema does not change the configuration schema.
+
+### Importable Go API
+
+`report.Collect` with `All: true` is the typed equivalent of `checkindex --all --json`. It reads the same `~/.checkIndex/config.json` and optionally filters collections:
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/mrcl-oss/checkIndex/report"
+)
+
+func inspect(ctx context.Context) {
+    result, err := report.Collect(ctx, report.Options{All: true, Collection: "items"})
+    if err != nil {
+        log.Printf("incomplete report (partial=%t): %v", result.Partial, err)
+    }
+    var indexes report.Collection = result.Collections["items"]
+    var index report.Index = indexes["ix"]
+    var cluster report.Cluster = index.Clusters["production"]
+    for name, usage := range cluster.Nodes { // usage is report.NodeUsage
+        log.Printf("%s: count=%d primary=%t", name, usage.Count, usage.Primary)
+    }
+}
+```
+
+`report.Report.Collections` is `map[string]report.Collection`; each `Collection` is `map[string]report.Index`. `Index.Clusters` is `map[string]report.Cluster`, and `Cluster.Nodes` is `map[string]report.NodeUsage`. `Index.Total`, `Cluster.Total`, and `NodeUsage.Count` are `int64`; `NodeUsage.Primary` is `bool`. `Report.Partial` records incomplete collection and is not serialized. `report.Marshal` and `json.Marshal` emit the collections object; `json.Unmarshal` into `report.Report` restores typed counts without a floating-point conversion.
+
+Use exactly one selection: `All`, `ProfileName`, flat direct fields, or `Direct: report.Profile{...}`. Conflicting selections return an error before collection. Named and direct entry points remain available.
+
+Runnable Go API examples are in [`examples/`](examples/). The direct examples do not need a local profile:
 
 ```sh
 MONGODB_PASSWORD='your-secret' go run ./examples/json-report \
   --uri 'mongodb://seed.example:27017/?replicaSet=rs0' --username report-user --database app --auth admin
 MONGODB_PASSWORD='your-secret' go run ./examples/collection-report \
   --uri 'mongodb://seed.example:27017/?replicaSet=rs0' --username report-user --database app --auth admin --collection orders
+
+# All saved profiles; no direct connection flags needed
+go run ./examples/all-report --collection orders
 ```
 
-Set `MONGODB_PASSWORD` through an appropriate secret-management mechanism; environment variables avoid command-line arguments and source code but are not inherently secret (they may be exposed through process environments, diagnostics, or inherited by child processes). Add repeatable `--host-mapping discovered-host=reachable-host` flags when discovered node names are not reachable locally. The first example prints full JSON using `report.Marshal`; the second iterates counts for the selected collection. `report.Options` also supports direct URI, username, password, database, auth source, and host mappings in Go code. `ProfileName` remains available for local configured-profile selection. Partial results and errors retain their existing behavior.
+Set `MONGODB_PASSWORD` through an appropriate secret-management mechanism; environment variables avoid command-line arguments and source code but are not inherently secret (they may be exposed through process environments, diagnostics, or inherited by child processes). Add repeatable `--host-mapping discovered-host=reachable-host` flags to the direct examples when discovered node names are not reachable locally. The JSON example prints `report.Marshal` output; the collection example traverses typed clusters and nodes; the all-profile example retains available JSON and exits nonzero on collection errors.
 
 Direct mode is selected when all five connection flags (`--uri`, `--username`, `--password`, `--database`, and `--auth`) are supplied without `--cluster`. It does not read or create the profile config, and works even when the config is missing or contains only the blank starter profile. Without `--cluster`, any connection flags supplied with named profiles override only their corresponding fields on the alphabetically first named profile. If no usable named profile exists, partial connection flags fail clearly rather than being treated as direct mode. If `--cluster` is supplied, profile mode takes precedence and supplied connection flags override that profile. `--hostMapping source=target` may be repeated in either mode; mappings override matching configured keys in profile mode. Host mappings are optional in direct mode.
 
@@ -207,9 +268,9 @@ Direct mode is selected when all five connection flags (`--uri`, `--username`, `
 | `--database NAME`                    | Direct database name or profile override.                                                                  |
 | `--auth SOURCE`                      | Direct authentication source or profile override.                                                          |
 | `--hostMapping SOURCE=TARGET`        | Optional, repeatable mapping; CLI values replace matching profile keys.                                    |
-| `--collection NAME`, `-c NAME`       | Report only the named collection. Without it, all non-system collections are included.                     |
+| `--collection NAME`, `-c NAME`       | Select one or comma-separated collection names, including with `--all`. Defaults to all non-system collections. |
 | `--file [FILENAME]`                  | Write Markdown instead of terminal tables. Defaults to `output.md`; an optional filename follows the flag. |
-| `--all`                              | Report every configured profile in alphabetical order; other report and connection options are ignored.    |
+| `--all`                              | Report all profiles; honors `--collection` and `--json`, ignores other connection/output options.           |
 | `--json`                             | Emit JSON to stdout or, with `--file`, the named file.                                                     |
 | `--help`, `-h`                       | Show help without reading configuration or connecting to MongoDB.                                          |
 | `config`                             | Open the interactive configuration editor.                                                                 |
@@ -233,5 +294,6 @@ cmd/checkindex/       CLI entry point
 report/               public Go report API and stable report types
 examples/             standalone consumer programs for the public report API
 internal/checkindex/  config, MongoDB collection, reporting, and TUI
+internal/reportdata/  shared typed report schema and checked merging
 scripts/install.sh    per-user build-and-install script
 ```

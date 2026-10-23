@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/mrcl-oss/checkIndex/internal/reportdata"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 )
@@ -81,55 +83,77 @@ func newCommand(home string, out, errOut io.Writer, report Reporter) *cli.Comman
 				if report == nil {
 					return errors.New("reporter unavailable")
 				}
+				if cmd.Bool("json") {
+					combined, collectErr := CollectConfigured(ctx, config, cmd.String("collection"), func(ctx context.Context, p Profile, collection string) (reportdata.Report, error) {
+						var buffer bytes.Buffer
+						reportErr := report(ctx, p, Options{Collection: collection, JSON: true}, &buffer)
+						var data reportdata.Report
+						if buffer.Len() == 0 && reportErr != nil {
+							return data, reportErr
+						}
+						if err := json.Unmarshal(buffer.Bytes(), &data); err != nil {
+							return reportdata.Report{}, errors.Join(reportErr, errors.New("invalid report JSON"))
+						}
+						return data, reportErr
+					})
+					writeErr := json.NewEncoder(cmd.Root().Writer).Encode(combined)
+					return errors.Join(collectErr, writeErr)
+				}
 				names := make([]string, 0, len(config.Cluster))
 				for name := range config.Cluster {
 					names = append(names, name)
 				}
 				sort.Strings(names)
+
+				type clusterResult struct {
+					name       string
+					profileErr error
+					reportErr  error
+					output     []byte
+				}
+
+				results := make([]clusterResult, len(names))
+				var wg sync.WaitGroup
+				wg.Add(len(names))
+				for i, name := range names {
+					go func(idx int, clusterName string) {
+						defer wg.Done()
+						res := clusterResult{name: clusterName}
+						profile, profileErr := config.selectProfile(clusterName, nil)
+						if profileErr != nil {
+							res.profileErr = profileErr
+							results[idx] = res
+							return
+						}
+						var buffer bytes.Buffer
+						res.reportErr = report(ctx, profile, Options{Collection: cmd.String("collection"), JSON: cmd.Bool("json")}, &buffer)
+						res.output = buffer.Bytes()
+						results[idx] = res
+					}(i, name)
+				}
+				wg.Wait()
+
 				var failures []error
-				combined := map[string]map[string]map[string]int64{}
-				for _, name := range names {
-					profile, profileErr := config.selectProfile(name, nil)
-					if profileErr != nil {
-						failures = append(failures, fmt.Errorf("profile %q: %w", name, profileErr))
+				for _, res := range results {
+					if res.profileErr != nil {
+						failures = append(failures, fmt.Errorf("profile %q: %w", res.name, res.profileErr))
 						continue
 					}
 					if !cmd.Bool("json") {
-						if _, writeErr := fmt.Fprintf(cmd.Root().Writer, "Profile: %s\n", name); writeErr != nil {
-							failures = append(failures, fmt.Errorf("profile %q: %w", name, writeErr))
+						if _, writeErr := fmt.Fprintf(cmd.Root().Writer, "Profile: %s\n", res.name); writeErr != nil {
+							failures = append(failures, fmt.Errorf("profile %q: %w", res.name, writeErr))
 							continue
 						}
-					}
-					profileOut := cmd.Root().Writer
-					var buffer bytes.Buffer
-					if cmd.Bool("json") {
-						profileOut = &buffer
-					}
-					if reportErr := report(ctx, profile, Options{JSON: cmd.Bool("json")}, profileOut); reportErr != nil {
-						failures = append(failures, fmt.Errorf("profile %q: %w", name, reportErr))
-					}
-					if cmd.Bool("json") && buffer.Len() > 0 {
-						var parsed map[string]map[string]map[string]int64
-						if json.Unmarshal(buffer.Bytes(), &parsed) == nil {
-							for collection, indexes := range parsed {
-								if combined[collection] == nil {
-									combined[collection] = map[string]map[string]int64{}
-								}
-								for index, values := range indexes {
-									if combined[collection][index] == nil {
-										combined[collection][index] = map[string]int64{}
-									}
-									value := values["total"]
-									combined[collection][index][name] = value
-									combined[collection][index]["total"] += value
-								}
+						if len(res.output) > 0 {
+							if _, writeErr := cmd.Root().Writer.Write(res.output); writeErr != nil {
+								failures = append(failures, fmt.Errorf("profile %q: %w", res.name, writeErr))
+								continue
 							}
 						}
 					}
-				}
-				if cmd.Bool("json") {
-					encoded, _ := json.Marshal(combined)
-					_, _ = fmt.Fprintln(cmd.Root().Writer, string(encoded))
+					if res.reportErr != nil {
+						failures = append(failures, fmt.Errorf("profile %q: %w", res.name, res.reportErr))
+					}
 				}
 				return errors.Join(failures...)
 			}

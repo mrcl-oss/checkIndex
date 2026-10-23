@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -77,16 +79,25 @@ func TestCLIAllProfilesAreSortedLabeledAndIgnoreOverrides(t *testing.T) {
 	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"z":{"initialUri":"mongodb://z","username":"u","password":"p"},"a":{"initialUri":"mongodb://a","username":"u","password":"p"}}}`)
 	out := new(strings.Builder)
 	ignoredFile := filepath.Join(t.TempDir(), "ignored.md")
+	var mu sync.Mutex
 	var got []string
 	err := run([]string{"--all", "--cluster", "missing", "--uri", "broken", "--username", "x", "--password", "x", "--database", "x", "--auth", "x", "--collection", "items", "--hostMapping", "malformed", "--file", ignoredFile}, home, out, func(_ context.Context, p Profile, o Options, w io.Writer) error {
+		mu.Lock()
 		got = append(got, p.Name)
-		if o.Cluster != "" || o.Collection != "" || o.File != "" || o.Password != nil || o.Direct || p.InitialURI != "mongodb://"+p.Name || p.Username != "u" {
+		mu.Unlock()
+		if o.Cluster != "" || o.Collection != "items" || o.File != "" || o.Password != nil || o.Direct || p.InitialURI != "mongodb://"+p.Name || p.Username != "u" {
 			t.Errorf("overrides were not ignored: profile=%+v options=%+v", p, o)
 		}
 		_, _ = io.WriteString(w, p.Name+" report\n")
 		return nil
 	})
-	if err != nil || strings.Join(got, ",") != "a,z" || !strings.Contains(out.String(), "Profile: a") || !strings.Contains(out.String(), "Profile: z") || !strings.Contains(out.String(), "a report") || !strings.Contains(out.String(), "z report") {
+	mu.Lock()
+	sort.Strings(got)
+	joined := strings.Join(got, ",")
+	mu.Unlock()
+	idxA := strings.Index(out.String(), "Profile: a")
+	idxZ := strings.Index(out.String(), "Profile: z")
+	if err != nil || joined != "a,z" || idxA == -1 || idxZ == -1 || idxA > idxZ || !strings.Contains(out.String(), "a report") || !strings.Contains(out.String(), "z report") {
 		t.Fatalf("all profiles: got=%v output=%q err=%v", got, out.String(), err)
 	}
 	if _, statErr := os.Stat(ignoredFile); statErr == nil {
@@ -98,13 +109,20 @@ func TestCLIAllJSONCombinesProfilesAndIgnoresOverrides(t *testing.T) {
 	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"z":{"initialUri":"mongodb://z","username":"u","password":"p"},"a":{"initialUri":"mongodb://a","username":"u","password":"p"}}}`)
 	ignored := filepath.Join(t.TempDir(), "ignored.json")
 	var out bytes.Buffer
+	var mu sync.Mutex
 	var calls int
-	err := run([]string{"--all", "--json", "--cluster", "missing", "--collection", "x", "--file", ignored, "--uri", "broken"}, home, &out, func(_ context.Context, p Profile, o Options, w io.Writer) error {
+	err := run([]string{"--all", "--json", "--cluster", "missing", "--collection", "contacts", "--file", ignored, "--uri", "broken"}, home, &out, func(_ context.Context, p Profile, o Options, w io.Writer) error {
+		mu.Lock()
 		calls++
-		if !o.JSON || o.Cluster != "" || o.Collection != "" || o.File != "" {
+		mu.Unlock()
+		if !o.JSON || o.Cluster != "" || o.Collection != "contacts" || o.File != "" {
 			t.Fatalf("flags not handled: %+v", o)
 		}
-		_, _ = fmt.Fprintf(w, `{"items":{"ix":{"%s":2,"total":2}}}`, p.Name)
+		if o.Collection == "contacts" {
+			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"clusters":{"%s":{"nodes":{"node":{"count":2,"primary":true}},"total":2}},"total":2},"index-%s":{"clusters":{"%s":{"nodes":{"node":{"count":3,"primary":false}},"total":3}},"total":3}}}`, p.Name, p.Name, p.Name)
+		} else {
+			_, _ = fmt.Fprintf(w, `{"contacts":{"shared":{"clusters":{"%s":{"nodes":{"node":{"count":2,"primary":true}},"total":2}},"total":2},"index-%s":{"clusters":{"%s":{"nodes":{"node":{"count":3,"primary":false}},"total":3}},"total":3}},"other":{"not-contact":{"clusters":{"%s":{"nodes":{"node":{"count":9,"primary":false}},"total":9}},"total":9}}}`, p.Name, p.Name, p.Name, p.Name)
+		}
 		return nil
 	})
 	if err != nil || calls != 2 {
@@ -117,29 +135,106 @@ func TestCLIAllJSONCombinesProfilesAndIgnoresOverrides(t *testing.T) {
 	if _, err = os.Stat(ignored); !os.IsNotExist(err) {
 		t.Fatalf("--file should be ignored: %v", err)
 	}
-	index := result["items"].(map[string]any)["ix"].(map[string]any)
-	if len(result) != 1 || len(result["items"].(map[string]any)) != 1 || len(index) != 3 || index["a"] != float64(2) || index["z"] != float64(2) || index["total"] != float64(4) {
-		t.Fatalf("combined profile counts/total incorrect: %#v", index)
+	if len(result) != 1 {
+		t.Fatalf("collection filter not preserved in combined JSON: %#v", result)
+	}
+	contacts := result["contacts"].(map[string]any)
+	shared := contacts["shared"].(map[string]any)
+	indexA := contacts["index-a"].(map[string]any)
+	indexZ := contacts["index-z"].(map[string]any)
+	clusters, ok := shared["clusters"].(map[string]any)
+	if len(contacts) != 3 || len(shared) != 2 || !ok || len(clusters) != 2 || shared["total"] != float64(4) {
+		t.Fatalf("same index counts/total not combined: %#v", contacts)
+	}
+	if len(indexA) != 2 || indexA["clusters"] == nil || indexA["total"] != float64(3) || len(indexZ) != 2 || indexZ["clusters"] == nil || indexZ["total"] != float64(3) {
+		t.Fatalf("distinct index keys not preserved: %#v", contacts)
+	}
+}
+
+func TestCLIAllForwardsCollectionForTextAndJSON(t *testing.T) {
+	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"a":{"initialUri":"mongodb://a","username":"u","password":"p"},"b":{"initialUri":"mongodb://b","username":"u","password":"p"}}}`)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "text", args: []string{"--all", "--collection", "contacts"}},
+		{name: "JSON", args: []string{"--all", "--json", "--collection", "contacts"}},
+		{name: "omitted", args: []string{"--all"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			got := make([]string, 0, 2)
+			err := run(tc.args, home, io.Discard, func(_ context.Context, _ Profile, options Options, w io.Writer) error {
+				mu.Lock()
+				got = append(got, options.Collection)
+				mu.Unlock()
+				if options.JSON {
+					_, _ = io.WriteString(w, "{}")
+				}
+				return nil
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			want := "contacts"
+			if tc.name == "omitted" {
+				want = ""
+			}
+			if err != nil || len(got) != 2 || got[0] != want || got[1] != want {
+				t.Fatalf("reporter collections=%v want both %q, err=%v", got, want, err)
+			}
+		})
 	}
 }
 
 func TestCLIAllContinuesAfterProfileErrorsAndDefaultRemainsUnchanged(t *testing.T) {
 	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"omega":{"initialUri":"mongodb://omega","username":"u","password":"p"},"alpha":{"initialUri":"mongodb://alpha","username":"u","password":"p"},"z":{"initialUri":"mongodb://z","username":"u","password":"p"}}}`)
+	var mu sync.Mutex
 	var attempted []string
 	err := run([]string{"--all"}, home, io.Discard, func(_ context.Context, p Profile, _ Options, _ io.Writer) error {
+		mu.Lock()
 		attempted = append(attempted, p.Name)
+		mu.Unlock()
 		if p.Name == "omega" {
 			return errors.New("report failed")
 		}
 		return nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "report failed") || strings.Join(attempted, ",") != "alpha,omega,z" {
+	mu.Lock()
+	sort.Strings(attempted)
+	joined := strings.Join(attempted, ",")
+	mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "report failed") || joined != "alpha,omega,z" {
 		t.Fatalf("expected aggregated errors and continued reports: attempted=%v err=%v", attempted, err)
 	}
 	called := ""
 	err = run(nil, home, io.Discard, func(_ context.Context, p Profile, _ Options, _ io.Writer) error { called = p.Name; return nil })
 	if err != nil || called != "alpha" {
 		t.Fatalf("default changed: profile=%q err=%v", called, err)
+	}
+}
+
+func TestCLIAllRunsConcurrently(t *testing.T) {
+	home := writeTestConfig(t, `{"dbName":"db","authSource":"admin","hostMapping":{},"cluster":{"c1":{"initialUri":"mongodb://c1","username":"u","password":"p"},"c2":{"initialUri":"mongodb://c2","username":"u","password":"p"}}}`)
+	started := make(chan string, 2)
+	proceed := make(chan struct{})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run([]string{"--all"}, home, io.Discard, func(_ context.Context, p Profile, _ Options, _ io.Writer) error {
+			started <- p.Name
+			<-proceed
+			return nil
+		})
+	}()
+
+	c1 := <-started
+	c2 := <-started
+	if c1 == c2 {
+		t.Fatalf("expected different clusters, got %s and %s", c1, c2)
+	}
+	close(proceed)
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

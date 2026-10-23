@@ -7,13 +7,17 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type fakeDB struct {
+	mu                  sync.Mutex
 	hello               Hello
 	status              Status
 	statusErr, statsErr error
@@ -26,10 +30,17 @@ func (f *fakeDB) Hello(context.Context) (Hello, error)                  { return
 func (f *fakeDB) Status(context.Context) (Status, error)                { return f.status, f.statusErr }
 func (f *fakeDB) Collections(context.Context, string) ([]string, error) { return f.names, nil }
 func (f *fakeDB) Stats(context.Context, string, string) ([]IndexStat, error) {
+	f.mu.Lock()
 	f.queries++
+	f.mu.Unlock()
 	return f.rows, f.statsErr
 }
-func (f *fakeDB) Close(context.Context) error { f.closed++; return nil }
+func (f *fakeDB) Close(context.Context) error {
+	f.mu.Lock()
+	f.closed++
+	f.mu.Unlock()
+	return nil
+}
 
 func TestTopologyFallback(t *testing.T) {
 	for _, tt := range []struct {
@@ -63,8 +74,11 @@ func TestDirectClientsReusedAndClosed(t *testing.T) {
 	second := &fakeDB{rows: []IndexStat{{Name: "compound", Key: bson.D{{Key: "z", Value: 1}, {Key: "a", Value: -1}}, Accesses: Accesses{Ops: 7}}}}
 	clients := map[string]*fakeDB{"": seed, "a:1": first, "b:2": second}
 	calls := map[string]int{}
+	var callsMu sync.Mutex
 	dial := func(_ context.Context, _ Profile, host string) (Database, error) {
+		callsMu.Lock()
 		calls[host]++
+		callsMu.Unlock()
 		return clients[host], nil
 	}
 	var out bytes.Buffer
@@ -239,7 +253,14 @@ func TestJSONReportIsPureAndUsesExactNumericCounts(t *testing.T) {
 	}
 	collection := parsed["items"].(map[string]any)
 	index := collection["ix"].(map[string]any)
-	if len(collection) != 1 || index["production"] != json.Number("9007199254740993") || index["total"] != json.Number("9007199254740993") || len(index) != 2 {
+	clusters, ok := index["clusters"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing clusters/node schema: %s", out.String())
+	}
+	cluster := clusters["production"].(map[string]any)
+	nodes := cluster["nodes"].(map[string]any)
+	n := nodes["node"].(map[string]any)
+	if len(collection) != 1 || n["count"] != json.Number("9007199254740993") || n["primary"] != false || cluster["total"] != json.Number("9007199254740993") || index["total"] != json.Number("9007199254740993") || len(index) != 2 {
 		t.Fatalf("unexpected direct nesting or numeric values: %#v", parsed)
 	}
 }
@@ -265,11 +286,11 @@ func TestJSONFileContainsDocumentAndConsoleStaysClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded map[string]map[string]map[string]int64
+	var decoded jsonReport
 	if err = json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("invalid file JSON: %s", data)
 	}
-	if len(decoded) != 1 || len(decoded["items"]) != 1 || len(decoded["items"]["ix"]) != 2 || decoded["items"]["ix"]["direct"] != 4 || decoded["items"]["ix"]["total"] != 4 {
+	if len(decoded) != 1 || len(decoded["items"]) != 1 || decoded["items"]["ix"].Clusters["direct"].Nodes["node"].Count != 4 || decoded["items"]["ix"].Total != 4 {
 		t.Fatalf("unexpected file schema: %s", data)
 	}
 }
@@ -292,11 +313,175 @@ func TestJSONPartialFailurePreservesSuccessfulNodeData(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected partial error")
 	}
-	var decoded map[string]map[string]map[string]int64
+	var decoded jsonReport
 	if e := json.Unmarshal(out.Bytes(), &decoded); e != nil {
 		t.Fatalf("invalid JSON: %v", e)
 	}
-	if decoded["items"]["ix"]["cluster"] != 5 || decoded["items"]["ix"]["total"] != 5 || len(decoded) != 1 {
+	cluster := decoded["items"]["ix"].Clusters["cluster"]
+	if cluster.Total != 5 || len(cluster.Nodes) != 1 || !cluster.Nodes["a"].Primary || decoded["items"]["ix"].Total != 5 || len(decoded) != 1 {
 		t.Fatalf("partial data lost: %+v", decoded)
+	}
+}
+
+type concurrentFakeDB struct {
+	started chan string
+	proceed chan struct{}
+}
+
+func (c *concurrentFakeDB) Hello(context.Context) (Hello, error) { return Hello{Me: "node"}, nil }
+func (c *concurrentFakeDB) Status(context.Context) (Status, error) {
+	return Status{}, errors.New("standalone")
+}
+func (c *concurrentFakeDB) Collections(context.Context, string) ([]string, error) { return nil, nil }
+func (c *concurrentFakeDB) Stats(_ context.Context, _, col string) ([]IndexStat, error) {
+	c.started <- col
+	<-c.proceed
+	return []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 10}}}, nil
+}
+func (c *concurrentFakeDB) Close(context.Context) error { return nil }
+
+func TestCollectCollectionsConcurrently(t *testing.T) {
+	seed := &fakeDB{hello: Hello{Me: "node"}, statusErr: errors.New("standalone"), names: []string{"colB", "colA"}}
+	started := make(chan string, 2)
+	proceed := make(chan struct{})
+	node := &concurrentFakeDB{started: started, proceed: proceed}
+
+	dial := func(_ context.Context, _ Profile, host string) (Database, error) {
+		if host == "" {
+			return seed, nil
+		}
+		return node, nil
+	}
+
+	var out bytes.Buffer
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- collect(context.Background(), Profile{DBName: "testdb"}, Options{}, &out, dial)
+	}()
+
+	first := <-started
+	second := <-started
+	if first == second {
+		t.Fatalf("expected different collections, got %s and %s", first, second)
+	}
+	close(proceed)
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	text := out.String()
+	idxA := strings.Index(text, "=== testdb.colA ===")
+	idxB := strings.Index(text, "=== testdb.colB ===")
+	if idxA == -1 || idxB == -1 || idxA > idxB {
+		t.Fatalf("expected colA before colB in output:\n%s", text)
+	}
+}
+
+type nodeOverlapDB struct {
+	started chan<- string
+	ready   <-chan struct{}
+	name    string
+	closed  atomic.Int32
+}
+
+func (d *nodeOverlapDB) Hello(context.Context) (Hello, error) { return Hello{}, nil }
+func (d *nodeOverlapDB) Status(context.Context) (Status, error) {
+	return Status{}, errors.New("standalone")
+}
+func (d *nodeOverlapDB) Collections(context.Context, string) ([]string, error) { return nil, nil }
+func (d *nodeOverlapDB) Stats(context.Context, string, string) ([]IndexStat, error) {
+	d.started <- d.name
+	select {
+	case <-d.ready:
+		if d.name == "b" {
+			return nil, errors.New("$indexStats unauthorized")
+		}
+		return []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 7}}}, nil
+	case <-time.After(300 * time.Millisecond):
+		return nil, errors.New("timed out waiting for other node")
+	}
+}
+func (d *nodeOverlapDB) Close(context.Context) error { d.closed.Add(1); return nil }
+
+func TestCollectNodeStatsOverlapAndPartialCleanup(t *testing.T) {
+	started := make(chan string, 2)
+	ready := make(chan struct{})
+	a := &nodeOverlapDB{started: started, ready: ready, name: "a"}
+	b := &nodeOverlapDB{started: started, ready: ready, name: "b"}
+	seed := &fakeDB{hello: Hello{Hosts: []string{"a", "b"}}, statusErr: errors.New("standalone")}
+	var dialMu sync.Mutex
+	dialCounts := make(map[string]int)
+	dial := func(_ context.Context, _ Profile, host string) (Database, error) {
+		dialMu.Lock()
+		dialCounts[host]++
+		dialMu.Unlock()
+		switch host {
+		case "":
+			return seed, nil
+		case "a":
+			return a, nil
+		default:
+			return b, nil
+		}
+	}
+
+	result := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		result <- collect(context.Background(), Profile{DBName: "db"}, Options{JSON: true, Collection: "items"}, &out, dial)
+	}()
+
+	seen := make(map[string]bool)
+	for range 2 {
+		select {
+		case node := <-started:
+			seen[node] = true
+		case <-time.After(200 * time.Millisecond):
+			close(ready)
+			<-result
+			t.Fatal("Stats did not start on both nodes concurrently")
+		}
+	}
+	close(ready)
+	if err := <-result; !errors.Is(err, ErrPartialReport) {
+		t.Fatalf("collect error = %v, want partial report", err)
+	}
+	if !seen["a"] || !seen["b"] {
+		t.Fatalf("Stats started on nodes %v", seen)
+	}
+	if a.closed.Load() != 1 || b.closed.Load() != 1 || seed.closed != 1 {
+		t.Fatalf("clients not closed once: a=%d b=%d seed=%d", a.closed.Load(), b.closed.Load(), seed.closed)
+	}
+	if dialCounts["a"] != 1 || dialCounts["b"] != 1 {
+		t.Fatalf("node dial counts = %v", dialCounts)
+	}
+	var got jsonReport
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if got["items"]["ix"].Clusters["direct"].Total != 7 {
+		t.Fatalf("successful node data lost: %v", got)
+	}
+}
+
+func TestCollectCommaSeparatedCollections(t *testing.T) {
+	seed := &fakeDB{hello: Hello{Me: "node"}, statusErr: errors.New("standalone")}
+	node := &fakeDB{rows: []IndexStat{{Name: "ix", Accesses: Accesses{Ops: 5}}}}
+	dial := func(_ context.Context, _ Profile, host string) (Database, error) {
+		if host == "" {
+			return seed, nil
+		}
+		return node, nil
+	}
+	var out bytes.Buffer
+	err := collect(context.Background(), Profile{DBName: "testdb"}, Options{Collection: "orders, users"}, &out, dial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	idxOrders := strings.Index(text, "=== testdb.orders ===")
+	idxUsers := strings.Index(text, "=== testdb.users ===")
+	if idxOrders == -1 || idxUsers == -1 || idxOrders > idxUsers {
+		t.Fatalf("expected orders before users in output:\n%s", text)
 	}
 }
