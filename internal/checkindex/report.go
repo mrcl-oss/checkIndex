@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -158,6 +159,16 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 	if err != nil {
 		return err
 	}
+	uniqueNodes := nodes[:0]
+	seenNodes := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		if _, exists := seenNodes[node.Name]; exists {
+			continue
+		}
+		seenNodes[node.Name] = struct{}{}
+		uniqueNodes = append(uniqueNodes, node)
+	}
+	nodes = uniqueNodes
 	names := []string{o.Collection}
 	if o.Collection == "" {
 		names, err = seed.Collections(ctx, p.DBName)
@@ -171,6 +182,15 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			}
 		}
 		names = filtered
+	} else if strings.Contains(o.Collection, ",") {
+		raw := strings.Split(o.Collection, ",")
+		names = make([]string, 0, len(raw))
+		for _, item := range raw {
+			trimmed := strings.TrimSpace(item)
+			if trimmed != "" {
+				names = append(names, trimmed)
+			}
+		}
 	}
 	sort.Strings(names)
 	if !o.JSON {
@@ -178,78 +198,175 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			return err
 		}
 	}
-	clients := make(map[string]Database)
-	failed := false
-	for _, n := range nodes {
-		if _, exists := clients[n.Name]; exists {
-			continue
+	nodeClients := make([]Database, len(nodes))
+	nodeDialFailed := make([]bool, len(nodes))
+	var workers sync.WaitGroup
+	workers.Add(len(nodes))
+	for nodeIdx, node := range nodes {
+		go func(idx int, n Node) {
+			defer workers.Done()
+			db, dialErr := dial(ctx, p, n.Name)
+			if dialErr != nil {
+				nodeDialFailed[idx] = true
+				return
+			}
+			nodeClients[idx] = db
+		}(nodeIdx, node)
+	}
+	workers.Wait()
+	defer func() {
+		for _, db := range nodeClients {
+			if db == nil {
+				continue
+			}
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = db.Close(closeCtx)
+			cancel()
 		}
-		db, e := dial(ctx, p, n.Name)
-		clients[n.Name] = db
-		if e != nil {
-			clients[n.Name] = nil
+	}()
+
+	failed := false
+	for nodeIdx := range nodes {
+		if nodeDialFailed[nodeIdx] {
 			failed = true
 			if !o.JSON {
 				if _, err := fmt.Fprintln(out, "[WARN] Direct node connection failed; check connectivity, TLS and credentials."); err != nil {
 					return err
 				}
 			}
-			continue
 		}
-		opened = append(opened, db)
 	}
-	var markdown strings.Builder
-	var grandTotal int64
-	for _, name := range names {
-		usage := make(map[string]*IndexUsage)
-		for _, n := range nodes {
-			db := clients[n.Name]
-			if db == nil {
-				continue
-			}
-			stats, e := db.Stats(ctx, p.DBName, name)
-			if e != nil {
-				failed = true
-				if !o.JSON {
-					diagnostic := safeStatsError(e, p)
-					if _, err := fmt.Fprintf(out, "[WARN] $indexStats failed for node %s, collection %s (%s): %s.\n", n.Name, name, fmt.Sprintf("%T", e), diagnostic); err != nil {
-						return err
+
+	type collectionResult struct {
+		name        string
+		jsonIndexes map[string]map[string]int64
+		total       int64
+		err         error
+		failed      bool
+		warnLines   []string
+		fileOutput  string
+		termOutput  string
+	}
+
+	results := make([]collectionResult, len(names))
+	var collectionWorkers sync.WaitGroup
+	collectionWorkers.Add(len(names))
+	for i, name := range names {
+		go func(i int, name string) {
+			defer collectionWorkers.Done()
+			results[i] = func() collectionResult {
+				res := collectionResult{name: name}
+				usage := make(map[string]*IndexUsage)
+				type nodeStatsResult struct {
+					stats []IndexStat
+					err   error
+				}
+				nodeResults := make([]nodeStatsResult, len(nodes))
+				var statsWorkers sync.WaitGroup
+				for nodeIdx, db := range nodeClients {
+					if db == nil {
+						continue
+					}
+					statsWorkers.Add(1)
+					go func(nodeIdx int, db Database) {
+						defer statsWorkers.Done()
+						nodeResults[nodeIdx].stats, nodeResults[nodeIdx].err = db.Stats(ctx, p.DBName, name)
+					}(nodeIdx, db)
+				}
+				statsWorkers.Wait()
+
+				for nodeIdx, n := range nodes {
+					if nodeClients[nodeIdx] == nil {
+						continue
+					}
+					nodeResult := nodeResults[nodeIdx]
+					if nodeResult.err != nil {
+						res.failed = true
+						if !o.JSON {
+							diagnostic := safeStatsError(nodeResult.err, p)
+							res.warnLines = append(res.warnLines, fmt.Sprintf("[WARN] $indexStats failed for node %s, collection %s (%s): %s.", n.Name, name, fmt.Sprintf("%T", nodeResult.err), diagnostic))
+						}
+						continue
+					}
+					for _, s := range nodeResult.stats {
+						entry := usage[s.Name]
+						if entry == nil {
+							entry = &IndexUsage{Name: s.Name, Key: s.Key, PerNode: make(map[string]int64)}
+							usage[s.Name] = entry
+						}
+						var addErr error
+						entry.Total, addErr = addOps(entry.Total, s.Accesses.Ops)
+						if addErr != nil {
+							res.err = addErr
+							return res
+						}
+						entry.PerNode[n.Name] = s.Accesses.Ops
 					}
 				}
-				continue
-			}
-			for _, s := range stats {
-				entry := usage[s.Name]
-				if entry == nil {
-					entry = &IndexUsage{Name: s.Name, Key: s.Key, PerNode: make(map[string]int64)}
-					usage[s.Name] = entry
+
+				rows := make([]IndexUsage, 0, len(usage))
+				res.jsonIndexes = make(map[string]map[string]int64, len(usage))
+				for _, v := range usage {
+					rows = append(rows, *v)
+					res.jsonIndexes[v.Name] = map[string]int64{p.Name: v.Total, "total": v.Total}
+					var addErr error
+					res.total, addErr = addOps(res.total, v.Total)
+					if addErr != nil {
+						res.err = addErr
+						return res
+					}
 				}
-				entry.Total, e = addOps(entry.Total, s.Accesses.Ops)
-				if e != nil {
-					return e
+
+				sort.Slice(rows, func(i, j int) bool {
+					if rows[i].Total == rows[j].Total {
+						return rows[i].Name < rows[j].Name
+					}
+					return rows[i].Total < rows[j].Total
+				})
+
+				if o.JSON {
+					return res
 				}
-				entry.PerNode[n.Name] = s.Accesses.Ops
+
+				if o.File != "" {
+					table, renderErr := renderTables(rows, nodes, true)
+					if renderErr != nil {
+						res.err = renderErr
+						return res
+					}
+					res.fileOutput = fmt.Sprintf("## %s.%s\n\n%s\nTotal operations for %s: %d\n\n", escapeMarkdown(p.DBName), escapeMarkdown(name), table, escapeMarkdown(name), res.total)
+				} else {
+					table, renderErr := renderTables(rows, nodes, false)
+					if renderErr != nil {
+						res.err = renderErr
+						return res
+					}
+					res.termOutput = fmt.Sprintf("\n=== %s.%s ===\n%s\nTotal operations for %s: %d\n", p.DBName, name, table, name, res.total)
+				}
+				return res
+			}()
+		}(i, name)
+	}
+	collectionWorkers.Wait()
+
+	var markdown strings.Builder
+	var grandTotal int64
+	for _, res := range results {
+		if res.err != nil {
+			return res.err
+		}
+		if res.failed {
+			failed = true
+		}
+		if !o.JSON {
+			for _, warn := range res.warnLines {
+				if _, err := fmt.Fprintln(out, warn); err != nil {
+					return err
+				}
 			}
 		}
-		rows := make([]IndexUsage, 0, len(usage))
-		jsonIndexes := make(map[string]map[string]int64, len(usage))
-		var total int64
-		for _, v := range usage {
-			rows = append(rows, *v)
-			jsonIndexes[v.Name] = map[string]int64{p.Name: v.Total, "total": v.Total}
-			total, err = addOps(total, v.Total)
-			if err != nil {
-				return err
-			}
-		}
-		result[name] = jsonIndexes
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].Total == rows[j].Total {
-				return rows[i].Name < rows[j].Name
-			}
-			return rows[i].Total < rows[j].Total
-		})
-		grandTotal, err = addOps(grandTotal, total)
+		result[res.name] = res.jsonIndexes
+		grandTotal, err = addOps(grandTotal, res.total)
 		if err != nil {
 			return err
 		}
@@ -257,17 +374,9 @@ func collect(ctx context.Context, p Profile, o Options, out io.Writer, dial Dial
 			continue
 		}
 		if o.File != "" {
-			table, renderErr := renderTables(rows, nodes, true)
-			if renderErr != nil {
-				return renderErr
-			}
-			fmt.Fprintf(&markdown, "## %s.%s\n\n%s\nTotal operations for %s: %d\n\n", escapeMarkdown(p.DBName), escapeMarkdown(name), table, escapeMarkdown(name), total)
+			markdown.WriteString(res.fileOutput)
 		} else {
-			table, renderErr := renderTables(rows, nodes, false)
-			if renderErr != nil {
-				return renderErr
-			}
-			if _, err := fmt.Fprintf(out, "\n=== %s.%s ===\n%s\nTotal operations for %s: %d\n", p.DBName, name, table, name, total); err != nil {
+			if _, err := io.WriteString(out, res.termOutput); err != nil {
 				return err
 			}
 		}
